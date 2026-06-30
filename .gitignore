@@ -1,0 +1,15 @@
+# build artifacts
+/build/
+/WheelControl/
+/WheelControlApp/
+wheel_control_v3.java
+*.class
+
+# runtime-generated data (created on first launch)
+/data/*
+!/data/.gitkeep
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.log
