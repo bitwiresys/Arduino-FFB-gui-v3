@@ -61,7 +61,7 @@ copy "%BUILD%\%MAIN%.jar" "%JPKG_IN%\" >nul
 copy "%LIB%\*.jar" "%JPKG_IN%\" >nul
 copy "%LIB%\*.dll" "%JPKG_IN%\" >nul 2>nul
 
-"%JPACKAGE%" --type app-image --input "%JPKG_IN%" --dest "%~dp0" --name "WheelControlApp" --main-jar "%MAIN%.jar" --main-class %MAIN% --class-path "core.jar;controlP5.jar;GameControlPlus.jar;serial.jar;Sprites.jar;jssc.jar;native-lib-loader.jar;slf4j-api.jar;slf4j-nop.jar" --java-options "-Djava.library.path=$APPDIR" --app-version "3.0.0" --vendor "FFB Wheel" --description "Arduino FFB Wheel Control Panel"
+"%JPACKAGE%" --type app-image --input "%JPKG_IN%" --dest "%SRCDIR%" --name "WheelControlApp" --main-jar "%MAIN%.jar" --main-class %MAIN% --class-path "core.jar;controlP5.jar;GameControlPlus.jar;serial.jar;Sprites.jar;jssc.jar;native-lib-loader.jar;slf4j-api.jar;slf4j-nop.jar" --java-options "-Djava.library.path=$APPDIR" --app-version "3.0.0" --vendor "FFB Wheel" --description "Arduino FFB Wheel Control Panel"
 if %ERRORLEVEL% neq 0 (
     echo JPACKAGE FAILED
     if not defined CI pause
