@@ -26,6 +26,11 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Write build_info.txt
+        shell: pwsh
+        run: |
+          "gui-build-${{ github.run_number }}" | Out-File -FilePath "data\build_info.txt" -Encoding ascii -NoNewline
+
       - name: Build standalone app (jpackage)
         shell: cmd
         run: build-exe.bat

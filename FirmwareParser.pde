@@ -7,6 +7,10 @@ class FirmwareParser {
   String fullVersionString = "";
   String versionString = "";
   int versionNumber = 0;
+  // dustin's rig, added — raw, unordered option-letter string exactly as sent after the
+  // digits (e.g. "dwovm"), used by FirmwareUpdater to match this board against
+  // manifest.json entries by letter-set rather than by the decoded feature booleans below.
+  String optionLetters = "";
   byte opt1 = 0; // options byte 1: a z h i s m t f
   byte opt2 = 0; // options byte 2: e x w c r b d p
   byte opt3 = 0; // options byte 3: n l g u k
@@ -47,6 +51,7 @@ class FirmwareParser {
     }
 
     versionNumber = parseInt(versionString);
+    optionLetters = opts.equals("0") ? "" : opts;
     opt1 = decodeByte1(opts);
     opt2 = decodeByte2(opts);
     opt3 = decodeByte3(opts);

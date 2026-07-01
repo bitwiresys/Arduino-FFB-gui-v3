@@ -76,6 +76,19 @@ if %ERRORLEVEL% neq 0 (
 )
 mkdir "%OUT%\data" 2>nul
 
+rem avrdude (bundled for FirmwareUpdater's flashing step) sits next to the exe, not in app/,
+rem so FirmwareUpdater.getInstallDir()\avrdude\ finds it regardless of jar layout.
+if exist "%LIB%\avrdude" (
+    xcopy /E /I /Y "%LIB%\avrdude" "%OUT%\avrdude" >nul
+)
+
+rem data/build_info.txt (written by CI before this script runs) tells SelfUpdater which
+rem build number is currently installed. Local/dev builds have no such file — self-update
+rem checks silently no-op in that case, see SelfUpdater.buildNumber().
+for %%F in ("%~dp0data\*") do (
+    if /I not "%%~nxF"==".gitkeep" copy /Y "%%F" "%OUT%\data\" >nul
+)
+
 echo.
 echo ============================================
 echo  BUILD COMPLETE!

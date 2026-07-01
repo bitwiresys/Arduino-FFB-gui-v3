@@ -5,6 +5,7 @@
 
 class SerialManager {
   Serial port;
+  String portName = ""; // dustin's rig, added — FirmwareUpdater needs the port name to touch-reset into bootloader
   String readBuffer = "";
   String lastRead = "empty";
   String lastLine = null;  // set by onSerialData; polled by SetupWizard instead of readAvailable()
@@ -36,6 +37,7 @@ class SerialManager {
     try {
       port = new Serial(app, portName, baud);
       port.bufferUntil(10); // LF terminator
+      this.portName = portName;
       Log.info("SERIAL", strings.get("Подключено к ", "Connected to ") + portName + " @ " + baud + " baud");
       return true;
     } catch (Exception e) {

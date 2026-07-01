@@ -18,6 +18,8 @@ SerialManager serial;
 WheelProtocol proto;
 FirmwareParser fw;
 PImage wheelImg;
+SelfUpdater selfUpdater;           // dustin's rig, added — control-panel auto-update
+FirmwareUpdater firmwareUpdater;   // dustin's rig, added — wheel firmware auto-update
 
 FFBEffect[] effects = new FFBEffect[12];
 AxisConfig[] axes = new AxisConfig[5];
@@ -183,6 +185,8 @@ void setup() {
   proto = new WheelProtocol(serial);
   fw = new FirmwareParser();
   appState = new AppState();
+  selfUpdater = new SelfUpdater();
+  firmwareUpdater = new FirmwareUpdater();
 
   // Оси — generic, без привязки к семантике (ось может быть чем угодно)
   String[] axisNames = {strings.get("Ось 0 (X)", "Axis 0 (X)"), strings.get("Ось 1 (Y)", "Axis 1 (Y)"), strings.get("Ось 2 (Z)", "Axis 2 (Z)"), strings.get("Ось 3 (RX)", "Axis 3 (RX)"), strings.get("Ось 4 (RY)", "Axis 4 (RY)")};
@@ -220,6 +224,7 @@ void setup() {
     try { initSerial(); } catch (Throwable t) { Log.error("SERIAL", "Serial init: " + t.getMessage()); }
   }
   Log.info("SYSTEM", strings.get("Инициализация завершена", "Initialization complete"));
+  selfUpdater.checkForUpdate(); // dustin's rig, added — runs in a background thread, non-blocking
 }
 
 void initUI() {
@@ -327,6 +332,12 @@ public void draw() {
   drawTooltip();   // подсказки рисуем последними, поверх всего
   Log.update();    // auto-export check
   wizard.draw();   // оверлей настройки — самый верхний слой
+
+  // dustin's rig, added — update toasts/modals draw above everything, including the wizard
+  selfUpdater.update();
+  selfUpdater.draw();
+  firmwareUpdater.update();
+  firmwareUpdater.draw();
 }
 
 // ============================================================
@@ -411,6 +422,7 @@ public void serialEvent(Serial p) {
 void parseResponse(String data) {
   if (data.startsWith("fw-v")) {
     fw.parse(data);
+    firmwareUpdater.checkForUpdate(); // dustin's rig, added — runs in a background thread, non-blocking
     return;
   }
   // dustin's rig, added — the 'N' command reply is exactly 3 space-separated ints ("raw threshold tripped"),
@@ -476,6 +488,9 @@ void toggleAxisDisable(int axisIdx) {
 }
 
 public void mousePressed() {
+  // dustin's rig, added — update toasts/modals take click priority over everything else
+  if (selfUpdater.handleClick()) return;
+  if (firmwareUpdater.handleClick()) return;
   if (wizard.active) { wizard.handleClick(); return; }
   int clickedTab = tabBar.handleClick();
   if (clickedTab >= 0) return;
