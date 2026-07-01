@@ -46,10 +46,17 @@ echo OK
 
 echo.
 echo [3/4] Packaging jar ...
-(
-echo Manifest-Version: 1.0
-echo Main-Class: %MAIN%
-) > "%BUILD%\MANIFEST.MF"
+rem jpackage has no --class-path flag; app-image launchers only run the --main-jar,
+rem so the extra dependency jars have to be listed in the jar's own manifest Class-Path
+rem instead (space-separated, relative to the jar - they'll sit next to it in app/).
+rem Delegated to a .ps1 (see make_manifest.ps1) instead of batch `echo` because manifest
+rem continuation lines must start with exactly one literal space, which batch mangles.
+powershell -NoProfile -File "%~dp0make_manifest.ps1" -MainClass "%MAIN%" -OutFile "%BUILD%\MANIFEST.MF" -ClassPathJars "core.jar controlP5.jar GameControlPlus.jar serial.jar Sprites.jar jssc.jar native-lib-loader.jar slf4j-api.jar slf4j-nop.jar"
+if %ERRORLEVEL% neq 0 (
+    echo MANIFEST GENERATION FAILED
+    if not defined CI pause
+    exit /b 1
+)
 "%JAR%" cfm "%BUILD%\%MAIN%.jar" "%BUILD%\MANIFEST.MF" -C "%BUILD%" . 2>nul
 
 echo.
@@ -61,7 +68,7 @@ copy "%BUILD%\%MAIN%.jar" "%JPKG_IN%\" >nul
 copy "%LIB%\*.jar" "%JPKG_IN%\" >nul
 copy "%LIB%\*.dll" "%JPKG_IN%\" >nul 2>nul
 
-"%JPACKAGE%" --type app-image --input "%JPKG_IN%" --dest "%SRCDIR%" --name "WheelControlApp" --main-jar "%MAIN%.jar" --main-class %MAIN% --class-path "core.jar;controlP5.jar;GameControlPlus.jar;serial.jar;Sprites.jar;jssc.jar;native-lib-loader.jar;slf4j-api.jar;slf4j-nop.jar" --java-options "-Djava.library.path=$APPDIR" --app-version "3.0.0" --vendor "FFB Wheel" --description "Arduino FFB Wheel Control Panel"
+"%JPACKAGE%" --type app-image --input "%JPKG_IN%" --dest "%SRCDIR%" --name "WheelControlApp" --main-jar "%MAIN%.jar" --main-class %MAIN% --java-options "-Djava.library.path=$APPDIR" --app-version "3.0.0" --vendor "FFB Wheel" --description "Arduino FFB Wheel Control Panel"
 if %ERRORLEVEL% neq 0 (
     echo JPACKAGE FAILED
     if not defined CI pause
