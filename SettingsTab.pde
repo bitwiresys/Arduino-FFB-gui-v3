@@ -84,7 +84,13 @@ class SettingsTab {
     pwmX = cx + 12; pwmY = cy + 40; pwmW = 560; pwmH = 260;
     prX = cx + 12 + pwmW + 12; prY = cy + 40; prW = cw - pwmW - 36; prH = ch - 52;
     drawPwm();
-    drawFwInfo(fw, pwmX, pwmY + pwmH + 12, pwmW, ch - (pwmY + pwmH + 12) + cy - 12);
+    float fwInfoH = 76;
+    drawFwInfo(fw, pwmX, pwmY + pwmH + 12, pwmW, fwInfoH);
+    // dustin's rig, added — NTC panel fills the rest of the left column down to the same
+    // bottom edge as the profiles panel on the right, so the two columns end flush.
+    float ntcY = pwmY + pwmH + 12 + fwInfoH + 12;
+    float colBottom = prY + prH;
+    drawNtcPanel(pwmX, ntcY, pwmW, colBottom - ntcY);
     drawProfiles();
     popStyle();
   }
@@ -161,6 +167,65 @@ class SettingsTab {
     } else text(strings.get("Прошивка не определена", "Firmware unknown"), x + 12, sy);
   }
 
+  // dustin's rig, added — motor NTC thermistor panel: live temperature (fixed 100k/B3950/330-ohm
+  // formula, no calibration UI — known hardware) and a drag slider for the cutoff threshold, 80-200°C.
+  int lastNtcPoll = 0;
+  float ntcSliderX, ntcSliderY, ntcSliderW, ntcSliderH;
+  boolean ntcSliderDragging = false;
+
+  void drawNtcPanel(float x, float y, float w, float h) {
+    panel(x, y, w, h, strings.get("Термистор мотора (NTC)", "Motor Thermistor (NTC)"));
+    if (serial.isConnected() && millis() - lastNtcPoll > 500) { lastNtcPoll = millis(); serial.enqueueCommand("N"); }
+
+    float sy = y + 30;
+    boolean haveReading = ntcRaw >= 0;
+    float liveC = haveReading ? rawToTempC(ntcRaw) : 0;
+    color statusCol = ntcTripped ? color(220, 70, 70) : (liveC > ntcThreshC() * 0.85 ? color(220, 180, 60) : color(80, 200, 110));
+    fill(haveReading ? statusCol : colDim); noStroke(); ellipse(x + 17, sy + 7, 11, 11);
+    fill(colText); textAlign(LEFT, CENTER); textSize(16);
+    text(haveReading ? nf(liveC, 1, 1) + "°C" : "—", x + 32, sy + 6);
+    fill(colDim); textAlign(LEFT, CENTER); textSize(9);
+    text((ntcTripped ? strings.get("ПЕРЕГРЕВ — FFB отключён", "OVERHEAT — FFB cut") : strings.get("норма", "OK")) + (haveReading ? "  (raw " + ntcRaw + ")" : ""), x + 32, sy + 21);
+    tipZone(x + 12, sy - 6, w - 24, 32, strings.get("Живая температура мотора по датчику NTC. Красный — сработала критическая защита и FFB отключён.", "Live motor temperature from the NTC sensor. Red — critical protection tripped, FFB is cut."));
+    sy += 40;
+
+    stroke(colEdge); strokeWeight(1); line(x + 12, sy, x + w - 12, sy); sy += 16;
+
+    float threshC = ntcThreshC();
+    fill(colDim); textAlign(LEFT, CENTER); textSize(10);
+    text(strings.get("Порог отключения FFB", "FFB cutoff threshold"), x + 12, sy);
+    fill(colAcc); textAlign(RIGHT, CENTER); textSize(14);
+    text(nf(threshC, 1, 0) + "°C", x + w - 12, sy);
+    sy += 24;
+
+    ntcSliderX = x + 16; ntcSliderY = sy; ntcSliderW = w - 32; ntcSliderH = 14;
+    float frac = constrain((threshC - NTC_THRESH_MIN_C) / (NTC_THRESH_MAX_C - NTC_THRESH_MIN_C), 0, 1);
+    fill(16); stroke(colEdge); rect(ntcSliderX, ntcSliderY, ntcSliderW, ntcSliderH, 7);
+    noStroke(); fill(color(215, 130, 60)); rect(ntcSliderX, ntcSliderY, ntcSliderW * frac, ntcSliderH, 7);
+    float knobX = ntcSliderX + ntcSliderW * frac;
+    fill(255); ellipse(knobX, ntcSliderY + ntcSliderH / 2.0, 20, 20);
+    fill(colDim); textAlign(LEFT, TOP); textSize(9);
+    text(int(NTC_THRESH_MIN_C) + "°C", ntcSliderX, ntcSliderY + ntcSliderH + 6);
+    textAlign(RIGHT, TOP); text(int(NTC_THRESH_MAX_C) + "°C", ntcSliderX + ntcSliderW, ntcSliderY + ntcSliderH + 6);
+    tipZone(ntcSliderX - 10, ntcSliderY - 12, ntcSliderW + 20, ntcSliderH + 34, strings.get("Тяните, чтобы задать температуру мотора, при которой FFB критически отключается.", "Drag to set the motor temperature at which FFB critically cuts off."));
+  }
+
+  void applyNtcSliderDrag() {
+    float frac = constrain((mouseX - ntcSliderX) / ntcSliderW, 0, 1);
+    float newC = NTC_THRESH_MIN_C + frac * (NTC_THRESH_MAX_C - NTC_THRESH_MIN_C);
+    int raw = int(constrain(tempCToRaw(newC), 0, 1023));
+    if (raw != ntcThreshold) {
+      ntcThreshold = raw;
+      proto.setParam("M ", ntcThreshold);
+    }
+  }
+
+  void handleDrag() { if (ntcSliderDragging) applyNtcSliderDrag(); }
+  void handleRelease() {
+    if (ntcSliderDragging) Log.info("SAFETY", strings.get("Порог NTC: ", "NTC threshold: ") + nf(ntcThreshC(), 1, 0) + "°C (raw " + ntcThreshold + ")");
+    ntcSliderDragging = false;
+  }
+
   void drawProfiles() {
     panel(prX, prY, prW, prH, strings.get("Профили настроек (на ПК)", "Settings Profiles (PC)"));
     fill(colDim); textAlign(LEFT, TOP); textSize(10);
@@ -233,6 +298,8 @@ class SettingsTab {
     y += 36;
     if (hit(pwmX + 120, y - 2, 34, 22)) { pwmFreq = max(0, pwmFreq - 1); applyPwm(); return; }
     if (hit(pwmX + 290, y - 2, 34, 22)) { pwmFreq = min(9, pwmFreq + 1); applyPwm(); return; }
+    // dustin's rig, added — захват слайдера порога NTC
+    if (hit(ntcSliderX - 10, ntcSliderY - 12, ntcSliderW + 20, ntcSliderH + 34)) { ntcSliderDragging = true; applyNtcSliderDrag(); return; }
     // профили: выбор слота
     float ly = prY + 46, lh = 28;
     for (int i = 0; i < NSLOTS; i++) {

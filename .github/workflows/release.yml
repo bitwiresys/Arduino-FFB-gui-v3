@@ -1,0 +1,52 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (needed for jpackage)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build standalone app (jpackage)
+        shell: cmd
+        run: build-exe.bat
+        env:
+          CI: "true"
+
+      - name: Zip release artifact
+        shell: pwsh
+        run: Compress-Archive -Path WheelControlApp\* -DestinationPath WheelControlApp.zip
+
+      # dustin's rig, added - a green build (compiles + jpackage succeeds) automatically publishes
+      # a GitHub Release with the standalone app (exe + app/ + runtime/ folders, zipped) so there's
+      # always a downloadable build matching the latest commit.
+      - name: Publish release
+        if: success() && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: gui-build-${{ github.run_number }}
+          name: "Wheel Control build ${{ github.run_number }}"
+          body: |
+            Automatic build from commit ${{ github.sha }}.
+            Standalone Windows app (no Java install needed) - unzip and run WheelControlApp.exe.
+          files: WheelControlApp.zip
+          generate_release_notes: false

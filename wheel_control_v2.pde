@@ -98,6 +98,40 @@ int ffbX = 0, ffbY = 0;
 byte effstate = 0;
 byte pwmstate = 0;
 int maxTorque = 2047;
+// dustin's rig, added — per-axis invert/disable bitmasks (bit0=X,1=Y,2=Z,3=RX,4=RY), matches firmware 'I'/'D' commands
+byte axisInvertMask = 0;
+byte axisDisableMask = 0;
+// dustin's rig, added — motor NTC thermistor: live raw reading, current critical threshold, tripped (FFB cut) state
+int ntcRaw = -1;
+int ntcThreshold = 1023;
+boolean ntcTripped = false;
+
+// dustin's rig, added — fixed-formula NTC raw<->Celsius conversion. No calibration UI: known hardware
+// (100k NTC, B3950 — the standard 3D-printer-style thermistor used here) with a 330-ohm fixed resistor
+// in the divider (NTC between 5V and the sense pin, resistor from sense pin to GND — see firmware).
+float NTC_R_FIXED = 330;     // ohms — actual fixed resistor installed
+float NTC_R0 = 100000;       // ohms at 25C
+float NTC_T0K = 298.15;      // 25C in Kelvin
+float NTC_BETA = 3950;       // standard B-value for this thermistor family
+
+float NTC_THRESH_MIN_C = 80, NTC_THRESH_MAX_C = 200, NTC_THRESH_DEFAULT_C = 120; // dustin's rig, added — slider range/default
+boolean ntcGotFirstReading = false, ntcDefaultApplied = false;
+
+float ntcRawToOhms(float raw) {
+  raw = constrain(raw, 1, 1022); // избегаем деления на 0 (raw=0) и вырождения (raw=1023)
+  return NTC_R_FIXED * (1023.0 - raw) / raw;
+}
+float rawToTempC(float raw) {
+  float r = ntcRawToOhms(raw);
+  float invT = 1.0 / NTC_T0K + (1.0 / NTC_BETA) * log(r / NTC_R0);
+  return (1.0 / invT) - 273.15;
+}
+float tempCToRaw(float tempC) {
+  float tK = tempC + 273.15;
+  float r = NTC_R0 * exp(NTC_BETA * (1.0 / tK - 1.0 / NTC_T0K));
+  return 1023.0 * NTC_R_FIXED / (r + NTC_R_FIXED);
+}
+float ntcThreshC() { return ntcThreshold >= 1023 ? NTC_THRESH_DEFAULT_C : constrain(rawToTempC(ntcThreshold), NTC_THRESH_MIN_C, NTC_THRESH_MAX_C); }
 
 ControlIO control;
 ControlDevice gpad;
@@ -379,6 +413,13 @@ void parseResponse(String data) {
     fw.parse(data);
     return;
   }
+  // dustin's rig, added — the 'N' command reply is exactly 3 space-separated ints ("raw threshold tripped"),
+  // distinct from every other bare numeric reply in the protocol (U has 18 fields, HR/HG have 2/6).
+  String[] parts = split(data, ' ');
+  if (parts.length == 3 && data.matches("[0-9 ]+")) {
+    parseNtcResponse(data);
+    return;
+  }
   if (data.length() > 11) {
     parseWheelParams(data);
   }
@@ -395,6 +436,43 @@ void parseWheelParams(String data) {
   if (t.length > 10) effects[10].gain = t[10] / 10.0;
   if (t.length > 14) encoderTab.cpr = int(t[14]);
   if (t.length > 15) pwmstate = byte(int(t[15]));
+  // dustin's rig, added — trailing fields appended to the 'U' response by the updated firmware
+  if (t.length > 16) axisInvertMask = byte(int(t[16]));
+  if (t.length > 17) axisDisableMask = byte(int(t[17]));
+}
+
+// dustin's rig, added — response to the 'N' command: "<raw> <threshold> <tripped 0/1>"
+void parseNtcResponse(String data) {
+  String[] t = split(data, ' ');
+  if (t.length < 3) return;
+  ntcRaw = int(t[0]);
+  ntcThreshold = int(t[1]);
+  ntcTripped = int(t[2]) != 0;
+  // dustin's rig, added — first time we hear from a wheel whose threshold is still at the firmware's
+  // "1023 = disabled" sentinel, push our own real default (120C) once, so the feature is live out of the box.
+  if (!ntcGotFirstReading) {
+    ntcGotFirstReading = true;
+    if (ntcThreshold >= 1023 && !ntcDefaultApplied) {
+      ntcDefaultApplied = true;
+      ntcThreshold = int(constrain(tempCToRaw(NTC_THRESH_DEFAULT_C), 0, 1023));
+      proto.setParam("M ", ntcThreshold);
+      Log.info("SAFETY", strings.get("Порог NTC по умолчанию: ", "Default NTC threshold: ") + int(NTC_THRESH_DEFAULT_C) + "°C");
+    }
+  }
+}
+
+// dustin's rig, added — flip one bit of the axis invert mask and push it to the firmware (command 'I')
+void toggleAxisInvert(int axisIdx) {
+  axisInvertMask = byte((int(axisInvertMask) & 0xFF) ^ (1 << axisIdx));
+  proto.setParam("I ", int(axisInvertMask) & 0xFF);
+  Log.info("AXIS", strings.get("Инверсия оси ", "Axis invert ") + dashboardTab.axPhys[axisIdx] + ": " + (bitReadByte(axisInvertMask, axisIdx) == 1 ? "ON" : "OFF"));
+}
+
+// dustin's rig, added — flip one bit of the axis disable mask and push it to the firmware (command 'D')
+void toggleAxisDisable(int axisIdx) {
+  axisDisableMask = byte((int(axisDisableMask) & 0xFF) ^ (1 << axisIdx));
+  proto.setParam("D ", int(axisDisableMask) & 0xFF);
+  Log.info("AXIS", strings.get("Отключение оси ", "Axis disable ") + dashboardTab.axPhys[axisIdx] + ": " + (bitReadByte(axisDisableMask, axisIdx) == 1 ? "ON" : "OFF"));
 }
 
 public void mousePressed() {
@@ -416,12 +494,14 @@ public void mouseReleased() {
   if (wizard.active) { wizard.handleRelease(); return; }
   if (tabBar.activeTab == TAB_DASHBOARD) dashboardTab.handleRelease();
   if (tabBar.activeTab == TAB_SHIFTER) shifterTab.handleRelease();
+  if (tabBar.activeTab == TAB_SETTINGS) settingsTab.handleRelease(); // dustin's rig, added — NTC slider
 }
 
 public void mouseDragged() {
   if (wizard.active) return;
   if (tabBar.activeTab == TAB_DASHBOARD) dashboardTab.handleDrag();
   else if (tabBar.activeTab == TAB_SHIFTER) shifterTab.handleDrag();
+  else if (tabBar.activeTab == TAB_SETTINGS) settingsTab.handleDrag(); // dustin's rig, added — NTC slider
 }
 
 public void mouseWheel(MouseEvent event) {

@@ -33,7 +33,7 @@ move /y "%~dp0%MAIN%.java" "%BUILD%\%MAIN%.java" >nul
 
 echo.
 echo [2/3] Compiling ...
-set "CP=%LIB%\core.jar;%LIB%\controlP5.jar;%LIB%\GameControlPlus.jar;%LIB%\serial.jar;%LIB%\Sprites.jar;%LIB%\jssc.jar"
+set "CP=%LIB%\core.jar;%LIB%\controlP5.jar;%LIB%\GameControlPlus.jar;%LIB%\serial.jar;%LIB%\Sprites.jar;%LIB%\jssc.jar;%LIB%\native-lib-loader.jar;%LIB%\slf4j-api.jar;%LIB%\slf4j-nop.jar"
 "%JAVAC%" -encoding UTF-8 --release 8 -nowarn -cp "%CP%" -d "%BUILD%" "%BUILD%\%MAIN%.java" 2>"%BUILD%\compile_errors.txt"
 if %ERRORLEVEL% neq 0 (
     echo COMPILATION FAILED:
@@ -64,7 +64,7 @@ rem --- Launcher BAT (uses java from JAVA_HOME — install a JRE/JDK 8+ to run) 
 (
 echo @echo off
 echo cd /d "%%~dp0"
-echo start "" "%%JAVA_HOME%%\bin\javaw.exe" -Djava.library.path=lib -cp "lib\core.jar;lib\controlP5.jar;lib\GameControlPlus.jar;lib\serial.jar;lib\Sprites.jar;lib\jssc.jar;lib\%MAIN%.jar" %MAIN%
+echo start "" "%%JAVA_HOME%%\bin\javaw.exe" -Djava.library.path=lib -cp "lib\core.jar;lib\controlP5.jar;lib\GameControlPlus.jar;lib\serial.jar;lib\Sprites.jar;lib\jssc.jar;lib\native-lib-loader.jar;lib\slf4j-api.jar;lib\slf4j-nop.jar;lib\%MAIN%.jar" %MAIN%
 ) > "%OUT%\WheelControl.bat"
 
 echo.

@@ -48,6 +48,10 @@ class DashboardTab {
   float[] ctlTrkX = new float[12], ctlTrkY = new float[12], ctlTrkW = new float[12];
   float[] ctlChkX = new float[12], ctlChkY = new float[12];   // чекбоксы desktop-эффектов в карточках (-1 = нет чекбокса)
   float ctlChkS = 14;
+  // dustin's rig, added — invert/disable pill-переключатели на карточках осей (команды 'I'/'D' прошивки)
+  float[] axInvX = new float[5], axInvY = new float[5];
+  float[] axDisX = new float[5], axDisY = new float[5];
+  float axPillW = 60, axPillH = 22;   // общие для всех 5 осей за кадр (см. drawAxisCard)
   float wheelBtnX, wheelBtnY, wheelBtnW, wheelBtnH;
   float resetBtnX, resetBtnY, resetBtnW, resetBtnH;
 
@@ -182,6 +186,7 @@ class DashboardTab {
     } else { fill(colDim); text(strings.get("Прошивка не определена", "Firmware unknown"), x + 12, sy); sy += 19; }
     info(x, sy, w, strings.get("CPR энкодера", "Encoder CPR"), str(encoderTab.cpr)); sy += 19;
     info(x, sy, w, strings.get("Макс. момент", "Max Torque"), str(maxTorque)); sy += 19;
+    if (fw != null && fw.magneticEncoder) { drawMotorTempRow(x, sy, w); sy += 19; } // dustin's rig, added
 
     // разделитель
     sy += 6; stroke(colEdge); strokeWeight(1); line(x + 12, sy, x + w - 12, sy); sy += 8;
@@ -206,6 +211,17 @@ class DashboardTab {
   void info(float x, float y, float w, String k, String v) {
     fill(colDim); textAlign(LEFT, TOP); textSize(10); text(k, x + 12, y);
     fill(colText); textAlign(RIGHT, TOP); text(v, x + w - 12, y);
+  }
+
+  // dustin's rig, added — motor temperature row on the main Dashboard, color-coded
+  void drawMotorTempRow(float x, float y, float w) {
+    fill(colDim); textAlign(LEFT, TOP); textSize(10); text(strings.get("Темп. мотора", "Motor temp"), x + 12, y);
+    boolean have = ntcRaw >= 0;
+    float c = have ? rawToTempC(ntcRaw) : 0;
+    color vCol = ntcTripped ? color(220, 70, 70) : (c > ntcThreshC() * 0.85 ? color(220, 180, 60) : color(120, 200, 140));
+    fill(have ? vCol : colDim); textAlign(RIGHT, TOP); textSize(10);
+    text(!have ? "—" : (nf(c, 1, 0) + "°C" + (ntcTripped ? " ⚠" : "")), x + w - 12, y);
+    tipZone(x, y - 2, w, 18, strings.get("Живая температура мотора. Порог критического отключения FFB — на вкладке «Настройки».", "Live motor temperature. The FFB critical cutoff threshold is on the Settings tab."));
   }
   void drawWrapped(String s, float x, float y, float w, float lh) {
     textAlign(LEFT, TOP);
@@ -239,24 +255,50 @@ class DashboardTab {
     float live = constrain(map(axes[i].rawValue, -1, 1, 0, adMax), 0, adMax);
     boolean calib = cmdMin[i].length() > 0;
 
+    // whole-card tooltip drawn FIRST so the more specific pill tipZone()s below can
+    // override it later in the same frame (tipZone just last-writer-wins on hoverTip).
+    if (calib) {
+      tipZone(x, y, w, h, axPhys[i] + " (" + ROLE_NAMES[axisRole[i]] + ")" + strings.get(": «мин» чуть выше отпущенного значения, «макс» чуть ниже максимума хода. Команды ", ": “min” just above the released value, “max” just below full travel. Commands ") + trim(cmdMin[i]) + "/" + trim(cmdMax[i]) + ".");
+    } else {
+      tipZone(x, y, w, h, axPhys[i] + strings.get(" — руль/энкодер. Центр и CPR на вкладке «Энкодер».", " — steering/encoder. Center and CPR are on the Encoder tab."));
+    }
+
     // бейдж оси
-    fill(axColors[i]); noStroke(); rect(x + 10, y + 10, 28, 26, 5);
-    fill(0); textAlign(CENTER, CENTER); textSize(12); text(axPhys[i], x + 24, y + 23);
+    float rowAY = y + max(6, h * 0.05);
+    fill(axColors[i]); noStroke(); rect(x + 10, rowAY, 28, 26, 5);
+    fill(0); textAlign(CENTER, CENTER); textSize(12); text(axPhys[i], x + 24, rowAY + 13);
 
     // роль (кликабельна для осей 1..4; ось 0 — аппаратный энкодер, роль фиксирована)
     float roleX = x + 46, roleW = w - 46 - 96;
-    axRoleX[i] = roleX; axRoleY[i] = y + 10; axRoleW[i] = roleW;
-    boolean roleHov = i > 0 && mouseX >= roleX && mouseX <= roleX + roleW && mouseY >= y + 10 && mouseY <= y + 10 + axRoleH;
-    fill(roleHov ? color(255, 220, 120) : colText); textAlign(LEFT, TOP); textSize(14); text(ROLE_NAMES[axisRole[i]], roleX, y + 11);
+    axRoleX[i] = roleX; axRoleY[i] = rowAY; axRoleW[i] = roleW;
+    boolean roleHov = i > 0 && mouseX >= roleX && mouseX <= roleX + roleW && mouseY >= rowAY && mouseY <= rowAY + axRoleH;
+    fill(roleHov ? color(255, 220, 120) : colText); textAlign(LEFT, TOP); textSize(14); text(ROLE_NAMES[axisRole[i]], roleX, rowAY + 1);
     fill(colDim); textSize(8);
-    text(i == 0 ? strings.get("аппаратный энкодер — фиксировано", "hardware encoder — fixed") : strings.get("клик — сменить функцию", "click to change role"), roleX, y + 28);
+    text(i == 0 ? strings.get("аппаратный энкодер — фиксировано", "hardware encoder — fixed") : strings.get("клик — сменить функцию", "click to change role"), roleX, rowAY + 18);
 
     // живое значение
     fill(colAcc); textAlign(RIGHT, TOP); textSize(16);
-    text(int(live) + (calib ? "" : strings.get(" энк", " enc")), x + w - 12, y + 13);
+    text(int(live) + (calib ? "" : strings.get(" энк", " enc")), x + w - 12, rowAY + 3);
+
+    // dustin's rig, redesigned — invert/disable as full-width labeled pill toggles (was two
+    // unlabeled 14x14 mini-checkboxes, too small/unclear). Own row, scales with card height.
+    float rowBY = y + h * 0.42;
+    axPillH = max(20, h * 0.19);
+    float pillGap = 8;
+    axPillW = (w - 24 - pillGap) / 2.0;
+    float invX = x + 12, disX = invX + axPillW + pillGap;
+    axInvX[i] = invX; axInvY[i] = rowBY;
+    axDisX[i] = disX; axDisY[i] = rowBY;
+    boolean invOn = bitReadByte(axisInvertMask, i) == 1;
+    boolean disOn = bitReadByte(axisDisableMask, i) == 1;
+    drawTogglePill(invX, rowBY, axPillW, axPillH, strings.get("Инверсия", "Invert"), invOn, color(70, 140, 210));
+    drawTogglePill(disX, rowBY, axPillW, axPillH, strings.get("Откл. ось", "Disable axis"), disOn, color(210, 80, 80));
+    tipZone(invX, rowBY, axPillW, axPillH, strings.get("Инвертировать направление оси (команда I)", "Invert this axis' direction (command I)"));
+    tipZone(disX, rowBY, axPillW, axPillH, strings.get("Отключить ось — зафиксировать в нейтрали (команда D)", "Disable this axis — force it to neutral (command D)"));
 
     // полоса
-    float bX = x + 12, bW = w - 24, bY = y + 44;
+    float bX = x + 12, bW = w - 24, bY = rowBY + axPillH + max(6, h * 0.06);
+    axBarH = max(14, h * 0.15);
     axBarX[i] = bX; axBarW[i] = bW; axBarY[i] = bY;
     fill(14); stroke(colCardE); strokeWeight(1); rect(bX, bY, bW, axBarH, 3);
     stroke(42); strokeWeight(1);
@@ -276,12 +318,25 @@ class DashboardTab {
       float span = max(calMax[i] - calMin[i], 1);
       int travel = int(constrain((live - calMin[i]) / span * 100, 0, 100));
       fill(colAcc); textAlign(RIGHT, TOP); textSize(9); text(strings.get("ход ", "travel ") + travel + "%", bX + bW, bY + axBarH + 7);
-      tipZone(x, y, w, h, axPhys[i] + " (" + ROLE_NAMES[axisRole[i]] + ")" + strings.get(": «мин» чуть выше отпущенного значения, «макс» чуть ниже максимума хода. Команды ", ": “min” just above the released value, “max” just below full travel. Commands ") + trim(cmdMin[i]) + "/" + trim(cmdMax[i]) + ".");
     } else {
       fill(colDim); textAlign(LEFT, TOP); textSize(9);
       text(strings.get("руль / энкодер — калибровка на вкладке «Энкодер»", "steering/encoder — calibrate on Encoder tab"), bX, bY + axBarH + 7);
-      tipZone(x, y, w, h, axPhys[i] + strings.get(" — руль/энкодер. Центр и CPR на вкладке «Энкодер».", " — steering/encoder. Center and CPR are on the Encoder tab."));
     }
+  }
+
+  // dustin's rig, added — a labeled on/off pill switch: filled+bright when on, outlined+dim when off.
+  void drawTogglePill(float x, float y, float w, float h, String label, boolean on, color onColor) {
+    fill(on ? onColor : color(20, 20, 26));
+    stroke(on ? lerpColor(onColor, color(255), 0.3) : colCardE);
+    strokeWeight(1);
+    rect(x, y, w, h, h / 2.0);
+    // маленький кружок-индикатор слева, как у классического toggle-переключателя
+    float knobR = h * 0.6;
+    float knobX = on ? x + w - h / 2.0 : x + h / 2.0;
+    fill(on ? 255 : colDim); noStroke();
+    ellipse(knobX, y + h / 2.0, knobR, knobR);
+    fill(on ? 255 : colDim); textAlign(CENTER, CENTER); textSize(min(11, h * 0.42));
+    text(label, x + w / 2.0 + (on ? -h * 0.25 : h * 0.25), y + h / 2.0);
   }
 
   // ============ FFB (карточки) ============
@@ -428,6 +483,15 @@ class DashboardTab {
         saveAxisRoles();
         Log.info("AXIS", axPhys[i] + strings.get(" назначена как «", " assigned as “") + ROLE_NAMES[next] + strings.get("»", "”"));
         return;
+      }
+    }
+    // dustin's rig, added — invert/disable переключатели (все 5 осей, бит-маска совпадает с прошивкой)
+    for (int i = 0; i < 5; i++) {
+      if (mouseX >= axInvX[i] && mouseX <= axInvX[i] + axPillW && mouseY >= axInvY[i] && mouseY <= axInvY[i] + axPillH) {
+        toggleAxisInvert(i); return;
+      }
+      if (mouseX >= axDisX[i] && mouseX <= axDisX[i] + axPillW && mouseY >= axDisY[i] && mouseY <= axDisY[i] + axPillH) {
+        toggleAxisDisable(i); return;
       }
     }
   }

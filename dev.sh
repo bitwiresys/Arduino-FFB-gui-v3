@@ -8,7 +8,7 @@ LIB="$ROOT/lib"
 JAVAC="javac"
 JAVAW="java"
 BUILD="$ROOT/build"
-CP="$LIB/core.jar;$LIB/controlP5.jar;$LIB/GameControlPlus.jar;$LIB/serial.jar;$LIB/Sprites.jar;$LIB/jssc.jar"
+CP="$LIB/core.jar;$LIB/controlP5.jar;$LIB/GameControlPlus.jar;$LIB/serial.jar;$LIB/Sprites.jar;$LIB/jssc.jar;$LIB/native-lib-loader.jar;$LIB/slf4j-api.jar;$LIB/slf4j-nop.jar"
 MAIN="wheel_control_v3"
 
 cd "$ROOT"
