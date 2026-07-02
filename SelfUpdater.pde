@@ -150,6 +150,11 @@ class SelfUpdater {
     return appDir.getParentFile();
   }
 
+  // Skips everything under data/ EXCEPT build_info.txt - that file is the whole reason
+  // this method exists to skip data/ at all (avoid clobbering the user's COM_cfg.txt,
+  // axis_roles.txt, logs), but it's also the version marker this exact update mechanism
+  // depends on. Skipping it unconditionally meant every update "succeeded" while leaving
+  // the old build number in place, so the app kept re-detecting the same update forever.
   void extractZipSkippingData(File zipFile, File destDir) throws IOException {
     destDir.mkdirs();
     ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile));
@@ -157,7 +162,9 @@ class SelfUpdater {
     byte[] buf = new byte[32768];
     while ((entry = zis.getNextEntry()) != null) {
       String name = entry.getName().replace('\\', '/');
-      if (name.equals("data") || name.startsWith("data/")) { zis.closeEntry(); continue; }
+      boolean isDataPath = name.equals("data") || name.startsWith("data/");
+      boolean isBuildInfo = name.equals("data/build_info.txt");
+      if (isDataPath && !isBuildInfo) { zis.closeEntry(); continue; }
       File outFile = new File(destDir, name);
       if (entry.isDirectory()) {
         outFile.mkdirs();
@@ -189,7 +196,12 @@ class SelfUpdater {
     File bat = new File(System.getProperty("java.io.tmpdir"), "wheelcontrol_apply_update.bat");
     StringBuilder sb = new StringBuilder();
     sb.append("@echo off\r\n");
-    sb.append("robocopy \"" + srcDir.getAbsolutePath() + "\" \"" + destDir.getAbsolutePath() + "\" /E /R:20 /W:1 /NFL /NDL /NJH /NJS /XD \"data\"\r\n");
+    // No /XD "data" here: the staging tree's data/ folder only ever contains
+    // build_info.txt (extractZipSkippingData already dropped everything else under
+    // data/ before this runs), so copying it is exactly the point - it's the new
+    // version marker. Plain robocopy /E only touches files present in the source,
+    // so the user's own data/ files (COM_cfg.txt, logs, etc.) are untouched.
+    sb.append("robocopy \"" + srcDir.getAbsolutePath() + "\" \"" + destDir.getAbsolutePath() + "\" /E /R:20 /W:1 /NFL /NDL /NJH /NJS\r\n");
     sb.append("start \"\" \"" + new File(destDir, exeName).getAbsolutePath() + "\"\r\n");
     sb.append("rmdir /s /q \"" + srcDir.getAbsolutePath() + "\" >nul 2>nul\r\n");
     sb.append("del \"%~f0\" >nul 2>nul\r\n");
