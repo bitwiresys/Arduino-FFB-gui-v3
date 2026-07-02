@@ -112,6 +112,18 @@ boolean ntcTripped = false;
 int motorCurrentMA = -1;
 int lastCurrentPoll = 0;
 
+// dustin's rig, added — hard current limit (raw ADC, 'K' command / trailing field on 'U').
+// Replaces the Global Gain % slider entirely on boards with the 'q' feature: same fixed
+// calibration constants as the current readout (must match Config.h's MOTOR_CURRENT_* on
+// the firmware side exactly, since the firmware only stores/compares the raw ADC value).
+int currentLimitRaw = 1023; // 1023 = sentinel/no limit
+float CURRENT_MIRROR_RATIO = 8500.0;
+float CURRENT_SENSE_OHMS = 1000.0;
+// Direct inverse pair of the firmware's ReadMotorCurrentMA(): mA = raw * 5000 * ratio / (1023 * ohms)
+float currentRawToAmps(float raw) { return raw * 5.0 * CURRENT_MIRROR_RATIO / (1023.0 * CURRENT_SENSE_OHMS); }
+float currentAmpsToRaw(float amps) { return amps * 1023.0 * CURRENT_SENSE_OHMS / (5.0 * CURRENT_MIRROR_RATIO); }
+float CURRENT_LIMIT_MAX_A = 40; // slider range ceiling — a bit under the ~42.5A raw=1023 ceiling
+
 // dustin's rig, added — fixed-formula NTC raw<->Celsius conversion. No calibration UI: known hardware
 // (100k NTC, B3950 — the standard 3D-printer-style thermistor used here) with a 330-ohm fixed resistor
 // in the divider (NTC between 5V and the sense pin, resistor from sense pin to GND — see firmware).
@@ -477,6 +489,7 @@ void parseWheelParams(String data) {
   // dustin's rig, added — trailing fields appended to the 'U' response by the updated firmware
   if (t.length > 16) axisInvertMask = byte(int(t[16]));
   if (t.length > 17) axisDisableMask = byte(int(t[17]));
+  if (t.length > 18) currentLimitRaw = int(t[18]);
 }
 
 // dustin's rig, added — response to the 'N' command: "<raw> <threshold> <tripped 0/1>"

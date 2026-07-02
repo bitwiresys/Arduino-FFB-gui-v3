@@ -367,15 +367,26 @@ class DashboardTab {
     }
   }
 
+  // dustin's rig, added — is the connected firmware's "General Gain" slot (idx 1) actually a
+  // hard current limit (letter 'q')? If so the slider below is fully repurposed: amps instead
+  // of a %, sends 'K' instead of 'FG'. Real gain % stays untouched/unreachable in that case —
+  // per dustin's explicit ask, this is a cap on current, not a force multiplier anymore.
+  boolean isCurrentLimitSlot(int idx) {
+    return idx == 1 && fw != null && fw.optionLetters != null && fw.optionLetters.contains("q");
+  }
+
   void drawControl(int i, float x, float y, float w, float h) {
     int idx = ctlIdx[i];
-    float g = effects[idx].gain;
-    float ratio = constrain((g - ctlMin[i]) / (ctlMax[i] - ctlMin[i]), 0, 1);
+    boolean curLimit = isCurrentLimitSlot(idx);
+    float g = curLimit ? (currentLimitRaw >= 1023 ? CURRENT_LIMIT_MAX_A : min(currentRawToAmps(currentLimitRaw), CURRENT_LIMIT_MAX_A)) : effects[idx].gain;
+    float cMin = curLimit ? 0 : ctlMin[i];
+    float cMax = curLimit ? CURRENT_LIMIT_MAX_A : ctlMax[i];
+    float ratio = constrain((g - cMin) / (cMax - cMin), 0, 1);
     card(x, y, w, h);
     ctlCardX[i] = x; ctlCardY[i] = y; ctlCardW[i] = w; ctlCardH[i] = h;
 
     float titleX = x + 12;
-    if (isDesktopToggle(idx)) {
+    if (!curLimit && isDesktopToggle(idx)) {
       // маленький чекбокс: включить эффект как постоянный поверх игры (desktop-эффект)
       ctlChkX[i] = x + 12; ctlChkY[i] = y + 9;
       boolean on = effects[idx].userEnabled;
@@ -393,19 +404,28 @@ class DashboardTab {
       ctlChkX[i] = -1;
     }
 
-    fill(colText); textAlign(LEFT, TOP); textSize(12); text(ctlName[i], titleX, y + 9);
-    fill(colAcc); textAlign(RIGHT, TOP); textSize(13);
-    String vs = (idx == 0 || idx == 11) ? str(int(g)) : (idx == 10) ? nf(g, 1, 1) : str(int(g * 100));
-    String un = (idx == 0) ? "°" : (idx == 11) ? "" : "%";
+    String title = curLimit ? strings.get("Макс. ток мотора", "Max Motor Current") : ctlName[i];
+    fill(colText); textAlign(LEFT, TOP); textSize(12); text(title, titleX, y + 9);
+    fill(curLimit ? color(220, 150, 60) : colAcc); textAlign(RIGHT, TOP); textSize(13);
+    String vs, un;
+    if (curLimit) {
+      vs = (currentLimitRaw >= 1023) ? strings.get("выкл", "off") : nf(g, 1, 1); un = (currentLimitRaw >= 1023) ? "" : "A";
+    } else {
+      vs = (idx == 0 || idx == 11) ? str(int(g)) : (idx == 10) ? nf(g, 1, 1) : str(int(g * 100));
+      un = (idx == 0) ? "°" : (idx == 11) ? "" : "%";
+    }
     text(vs + un, x + w - 12, y + 8);
 
     float tX = x + 12, tW = w - 24, tY = y + 34, tH = 8;
     ctlTrkX[i] = tX; ctlTrkY[i] = tY; ctlTrkW[i] = tW;
     fill(16); noStroke(); rect(tX, tY, tW, tH, 4);
-    fill(colAcc); rect(tX, tY, tW * ratio, tH, 4);
+    fill(curLimit ? color(220, 150, 60) : colAcc); rect(tX, tY, tW * ratio, tH, 4);
     fill(235); ellipse(tX + tW * ratio, tY + tH / 2, 14, 14);
 
-    fill(colDim); textSize(9); drawWrapped(ctlTip[i], x + 12, y + 50, w - 24, 12);
+    String tip = curLimit
+      ? strings.get("Жёсткий предел тока мотора через IS-пин BTS7960. FFB никогда не превысит этот ток. Крайнее правое положение = без лимита.", "Hard motor current cap via the BTS7960 IS pin. FFB torque never exceeds this current. All the way right = no limit.")
+      : ctlTip[i];
+    fill(colDim); textSize(9); drawWrapped(tip, x + 12, y + 50, w - 24, 12);
   }
 
   // ============ ВВОД ============
@@ -464,6 +484,18 @@ class DashboardTab {
     int i = dragCtl, idx = ctlIdx[i];
     float rx = ctlTrkX[i], rw = ctlTrkW[i];
     float ratio = constrain((mouseX - rx) / rw, 0, 1);
+    if (isCurrentLimitSlot(idx)) {
+      // dustin's rig, added — this slot is a hard current cap on 'q' boards, not a % gain.
+      // All the way right (ratio==1) means "no limit" (raw sentinel 1023), not "max amps".
+      if (ratio >= 0.995) {
+        currentLimitRaw = 1023;
+      } else {
+        float amps = ratio * CURRENT_LIMIT_MAX_A;
+        currentLimitRaw = int(constrain(currentAmpsToRaw(amps), 0, 1022));
+      }
+      proto.setParam("K ", currentLimitRaw);
+      return;
+    }
     float g = ctlMin[i] + ratio * (ctlMax[i] - ctlMin[i]);
     if (idx == 0) g = round(g / 5.0) * 5;
     if (idx == 11) g = round(g);
