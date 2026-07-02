@@ -257,12 +257,24 @@ class SettingsTab {
   String profilePath(int i) { return "profiles/profile" + (i + 1) + ".txt"; }
   boolean profileExists(int i) { return new File(dataPath(profilePath(i))).exists(); }
 
+  // dustin's rig, added — profile format was originally frozen at 14 fields (gains/cpr/pwm
+  // only), so axis invert/disable, pedal min/max calibration, NTC threshold, current limit
+  // and per-effect enable toggles silently didn't round-trip through PC profile slots even
+  // though they already autosave to the Arduino's own EEPROM. Extended to 32 fields;
+  // loadProfile() stays backward-compatible with older/shorter profile files.
   void saveProfile(int i) {
-    String[] lines = new String[14];
+    String[] lines = new String[32];
     lines[0] = str(int(effects[0].gain));
     for (int e = 1; e < 12; e++) lines[e] = str(effects[e].gain);
     lines[12] = str(encoderTab.cpr);
     lines[13] = str(int(pwmstate) & 0xFF);
+    lines[14] = str(int(axisInvertMask) & 0xFF);
+    lines[15] = str(int(axisDisableMask) & 0xFF);
+    lines[16] = str(ntcThreshold);
+    lines[17] = str(currentLimitRaw);
+    lines[18] = str(int(effstate) & 0xFF);
+    for (int a = 1; a < 5; a++) lines[18 + a] = str(int(dashboardTab.calMin[a]));
+    for (int a = 1; a < 5; a++) lines[22 + a] = str(int(dashboardTab.calMax[a]));
     saveStrings(dataPath(profilePath(i)), lines);
     Log.info("PROFILE", strings.get("Сохранён профиль ", "Saved profile ") + (i + 1));
   }
@@ -275,6 +287,22 @@ class SettingsTab {
     if (lines.length > 13) {
       pwmstate = byte(int(lines[13])); proto.setPwmState(int(pwmstate) & 0xFF);
     }
+    if (lines.length > 26) {
+      axisInvertMask = byte(int(lines[14]) & 0xFF); proto.setParam("I ", int(axisInvertMask) & 0xFF);
+      axisDisableMask = byte(int(lines[15]) & 0xFF); proto.setParam("D ", int(axisDisableMask) & 0xFF);
+      ntcThreshold = int(lines[16]); proto.setParam("M ", ntcThreshold);
+      currentLimitRaw = int(lines[17]); proto.setParam("K ", currentLimitRaw);
+      effstate = byte(int(lines[18]) & 0xFF); decodeEffstate(effstate); applyEffstate();
+      for (int a = 1; a < 5; a++) {
+        dashboardTab.calMin[a] = float(lines[18 + a]);
+        proto.setParam(dashboardTab.cmdMin[a], int(dashboardTab.calMin[a]));
+      }
+      for (int a = 1; a < 5; a++) {
+        dashboardTab.calMax[a] = float(lines[22 + a]);
+        proto.setParam(dashboardTab.cmdMax[a], int(dashboardTab.calMax[a]));
+      }
+    }
+    proto.requestAutosave();
     Log.info("PROFILE", strings.get("Загружен профиль ", "Loaded profile ") + (i + 1) + strings.get(" — настройки отправлены в Arduino", " — settings sent to Arduino"));
   }
   void deleteProfile(int i) {
