@@ -108,6 +108,10 @@ int ntcRaw = -1;
 int ntcThreshold = 1023;
 boolean ntcTripped = false;
 
+// dustin's rig, added — live motor current in mA, from the 'J' command (BTS7960 IS pin). -1 = no reading yet.
+int motorCurrentMA = -1;
+int lastCurrentPoll = 0;
+
 // dustin's rig, added — fixed-formula NTC raw<->Celsius conversion. No calibration UI: known hardware
 // (100k NTC, B3950 — the standard 3D-printer-style thermistor used here) with a 330-ohm fixed resistor
 // in the divider (NTC between 5V and the sense pin, resistor from sense pin to GND — see firmware).
@@ -306,6 +310,16 @@ public void draw() {
   hoverTip = null;
   serial.update();
   proto.update();
+  // dustin's rig, added — live motor current poll. Both 'J' and the firmware-update 'X'
+  // command reply with a single bare integer with no distinguishing marker, so this only
+  // starts once that request/response cycle is done (localBuildId gets set) to avoid the
+  // two colliding on the wire.
+  if (serial.isConnected() && !firmwareUpdater.flashing && firmwareUpdater.localBuildId >= 0
+      && fw != null && fw.fullVersionString != null && fw.fullVersionString.contains("q")
+      && millis() - lastCurrentPoll > 500) {
+    lastCurrentPoll = millis();
+    serial.enqueueCommand("J");
+  }
   readHIDInputs();
   for (int i = 0; i < 5; i++) {
     if (axisEnabled[i]) {
@@ -432,11 +446,16 @@ void parseResponse(String data) {
     parseNtcResponse(data);
     return;
   }
-  // dustin's rig, added — the 'X' command reply is a single bare integer (FW_BUILD_ID). Only
-  // consumed while FirmwareUpdater is actually waiting for one (see onLocalBuildId's own guard),
-  // so it can't be confused with the handful of other single-digit acks in the protocol (e.g. 'P').
+  // dustin's rig, added — 'X' (FW_BUILD_ID) and 'J' (motor current mA) both reply with a single
+  // bare integer, no distinguishing marker. Routed by context: 'X' is only ever requested once,
+  // early (see FirmwareUpdater.checkForUpdate); the current poll doesn't start until that's
+  // resolved (localBuildId >= 0), so once resolved every later bare integer is 'J's.
   if (data.matches("[0-9]+")) {
-    firmwareUpdater.onLocalBuildId(int(data));
+    if (firmwareUpdater.localBuildId < 0) {
+      firmwareUpdater.onLocalBuildId(int(data));
+    } else {
+      motorCurrentMA = int(data);
+    }
     return;
   }
   if (data.length() > 11) {

@@ -187,6 +187,7 @@ class DashboardTab {
     info(x, sy, w, strings.get("CPR энкодера", "Encoder CPR"), str(encoderTab.cpr)); sy += 19;
     info(x, sy, w, strings.get("Макс. момент", "Max Torque"), str(maxTorque)); sy += 19;
     if (fw != null && fw.magneticEncoder) { drawMotorTempRow(x, sy, w); sy += 19; } // dustin's rig, added
+    if (fw != null && fw.optionLetters != null && fw.optionLetters.contains("q")) { drawMotorCurrentRow(x, sy, w); sy += 19; } // dustin's rig, added
 
     // разделитель
     sy += 6; stroke(colEdge); strokeWeight(1); line(x + 12, sy, x + w - 12, sy); sy += 8;
@@ -222,6 +223,17 @@ class DashboardTab {
     fill(have ? vCol : colDim); textAlign(RIGHT, TOP); textSize(10);
     text(!have ? "—" : (nf(c, 1, 0) + "°C" + (ntcTripped ? " ⚠" : "")), x + w - 12, y);
     tipZone(x, y - 2, w, 18, strings.get("Живая температура мотора. Порог критического отключения FFB — на вкладке «Настройки».", "Live motor temperature. The FFB critical cutoff threshold is on the Settings tab."));
+  }
+
+  // dustin's rig, added — live motor current row (BTS7960 IS pin), shown next to motor temp
+  void drawMotorCurrentRow(float x, float y, float w) {
+    fill(colDim); textAlign(LEFT, TOP); textSize(10); text(strings.get("Ток мотора", "Motor current"), x + 12, y);
+    boolean have = motorCurrentMA >= 0;
+    float amps = have ? motorCurrentMA / 1000.0 : 0;
+    color vCol = amps > 30 ? color(220, 70, 70) : (amps > 20 ? color(220, 180, 60) : color(120, 200, 140));
+    fill(have ? vCol : colDim); textAlign(RIGHT, TOP); textSize(10);
+    text(!have ? "—" : (nf(amps, 1, 1) + "A"), x + w - 12, y);
+    tipZone(x, y - 2, w, 18, strings.get("Живой ток мотора через IS-пин BTS7960 (не то же самое, что Global Gain — это настройка, а не измерение).", "Live motor current via the BTS7960 IS pin (not the same as Global Gain — that's a setting, this is a measurement)."));
   }
   void drawWrapped(String s, float x, float y, float w, float lh) {
     textAlign(LEFT, TOP);
