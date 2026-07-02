@@ -175,7 +175,10 @@ class SettingsTab {
 
   void drawNtcPanel(float x, float y, float w, float h) {
     panel(x, y, w, h, strings.get("Термистор мотора (NTC)", "Motor Thermistor (NTC)"));
-    if (serial.isConnected() && millis() - lastNtcPoll > 500) { lastNtcPoll = millis(); serial.enqueueCommand("N"); }
+    // dustin's rig, added — firmwareUpdater.flashing guard: this poll racing with the
+    // firmware-update background thread's disconnect()/1200-baud touch was silently
+    // corrupting the port and making the touch-reset fail every time.
+    if (serial.isConnected() && !firmwareUpdater.flashing && millis() - lastNtcPoll > 500) { lastNtcPoll = millis(); serial.enqueueCommand("N"); }
 
     float sy = y + 30;
     boolean haveReading = ntcRaw >= 0;

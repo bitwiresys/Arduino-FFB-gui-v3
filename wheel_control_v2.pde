@@ -432,6 +432,13 @@ void parseResponse(String data) {
     parseNtcResponse(data);
     return;
   }
+  // dustin's rig, added — the 'X' command reply is a single bare integer (FW_BUILD_ID). Only
+  // consumed while FirmwareUpdater is actually waiting for one (see onLocalBuildId's own guard),
+  // so it can't be confused with the handful of other single-digit acks in the protocol (e.g. 'P').
+  if (data.matches("[0-9]+")) {
+    firmwareUpdater.onLocalBuildId(int(data));
+    return;
+  }
   if (data.length() > 11) {
     parseWheelParams(data);
   }

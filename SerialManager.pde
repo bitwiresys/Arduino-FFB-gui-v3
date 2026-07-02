@@ -67,6 +67,12 @@ class SerialManager {
   // Direct write (for time-critical commands)
   void sendImmediate(String cmd) {
     if (port == null) return;
+    // dustin's rig, added — while FirmwareUpdater is mid-flash (disconnected, doing the
+    // 1200-baud touch-reset on a background thread), nothing else may touch the port:
+    // any stray write here (e.g. a periodic UI poll) races with that sequence and can
+    // silently corrupt the port state, making the touch-reset fail. FirmwareUpdater
+    // itself never calls sendImmediate() during that window, so this can't block it.
+    if (firmwareUpdater != null && firmwareUpdater.flashing) return;
     port.write(cmd + (char)13);
     lastWrite = cmd;
     writeTimestamp = millis();

@@ -154,7 +154,12 @@ class UpdatePanel {
       }
     } else if (state == DONE) {
       fill(colOk); textAlign(LEFT, TOP); textSize(13);
-      text("✓ " + statusText, px + 16, cy);
+      text("✓ " + statusText, px + 16, cy, pw - 32, ph - 100);
+
+      modalCloseVisible = true;
+      float bw = 120, bh = 34;
+      mBtnCloseX = px + pw - bw - 14; mBtnCloseY = py + ph - bh - 14; mBtnCloseW = bw; mBtnCloseH = bh;
+      drawBtn(mBtnCloseX, mBtnCloseY, mBtnCloseW, mBtnCloseH, strings.get("Закрыть", "Close"), colBtn);
     } else if (state == ERROR) {
       fill(colErr); textAlign(LEFT, TOP); textSize(12);
       text(errorText, px + 16, cy, pw - 32, ph - 100);
@@ -189,7 +194,10 @@ class UpdatePanel {
       if (modalRetryVisible && hit(mBtnRetryX, mBtnRetryY, mBtnRetryW, mBtnRetryH)) { clickedRetry = true; return true; }
       if (modalCloseVisible && hit(mBtnCloseX, mBtnCloseY, mBtnCloseW, mBtnCloseH)) { clickedClose = true; return true; }
     }
-    // WORKING/DONE modals are click-eating but have no interactive elements
+    if (state == DONE) {
+      if (modalCloseVisible && hit(mBtnCloseX, mBtnCloseY, mBtnCloseW, mBtnCloseH)) { clickedClose = true; return true; }
+    }
+    // WORKING is click-eating but has no interactive elements
     return isModal();
   }
 

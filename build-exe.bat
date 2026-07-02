@@ -76,10 +76,11 @@ if %ERRORLEVEL% neq 0 (
 )
 mkdir "%OUT%\data" 2>nul
 
-rem avrdude (bundled for FirmwareUpdater's flashing step) sits next to the exe, not in app/,
-rem so FirmwareUpdater.getInstallDir()\avrdude\ finds it regardless of jar layout.
-if exist "%LIB%\avrdude" (
-    xcopy /E /I /Y "%LIB%\avrdude" "%OUT%\avrdude" >nul
+rem arduino-cli + its bundled offline board/avrdude/discovery-tool data (for
+rem FirmwareUpdater's flashing step) sits next to the exe, not in app/, so
+rem FirmwareUpdater.getInstallDir()\arduino-cli\ finds it regardless of jar layout.
+if exist "%LIB%\arduino-cli" (
+    xcopy /E /I /Y "%LIB%\arduino-cli" "%OUT%\arduino-cli" >nul
 )
 
 rem data/build_info.txt (written by CI before this script runs) tells SelfUpdater which
