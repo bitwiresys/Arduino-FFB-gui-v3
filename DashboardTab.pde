@@ -186,9 +186,13 @@ class DashboardTab {
     } else { fill(colDim); text(strings.get("Прошивка не определена", "Firmware unknown"), x + 12, sy); sy += 19; }
     info(x, sy, w, strings.get("CPR энкодера", "Encoder CPR"), str(encoderTab.cpr)); sy += 19;
     info(x, sy, w, strings.get("Макс. момент", "Max Torque"), str(maxTorque)); sy += 19;
-    if (fw != null && fw.magneticEncoder) { drawMotorTempRow(x, sy, w); sy += 19; } // dustin's rig, added
-    if (fw != null && fw.optionLetters != null && fw.optionLetters.contains("q")) { drawMotorCurrentRow(x, sy, w); sy += 19; } // dustin's rig, added
-
+    // dustin's rig, added — сторожевой детектор срыва привода (прошивка ≥ v254)
+    if (ffbFaultLatched) {
+      fill(220, 70, 70); textAlign(LEFT, TOP); textSize(10);
+      text("⚠ " + strings.get("СРЫВ ПРИВОДА — FFB остановлен", "DRIVETRAIN FAULT — FFB stopped"), x + 12, sy);
+      tipZone(x, sy - 2, w, 18, strings.get("Энкодер неподвижен при работающем моторе (сорвана шестерня/муфта). Прошивка остановила FFB. Проверьте механику и перезапустите плату (USB).", "The encoder froze while the motor was driven (sheared gear/coupling). Firmware halted FFB. Check the mechanics and restart the board (re-plug USB)."));
+      sy += 19;
+    }
     // разделитель
     sy += 6; stroke(colEdge); strokeWeight(1); line(x + 12, sy, x + w - 12, sy); sy += 8;
     fill(colDim); textAlign(LEFT, TOP); textSize(10); text(strings.get("Живые оси (АЦП)", "Live Axes (ADC)"), x + 12, sy); sy += 18;
@@ -214,27 +218,6 @@ class DashboardTab {
     fill(colText); textAlign(RIGHT, TOP); text(v, x + w - 12, y);
   }
 
-  // dustin's rig, added — motor temperature row on the main Dashboard, color-coded
-  void drawMotorTempRow(float x, float y, float w) {
-    fill(colDim); textAlign(LEFT, TOP); textSize(10); text(strings.get("Темп. мотора", "Motor temp"), x + 12, y);
-    boolean have = ntcRaw >= 0;
-    float c = have ? rawToTempC(ntcRaw) : 0;
-    color vCol = ntcTripped ? color(220, 70, 70) : (c > ntcThreshC() * 0.85 ? color(220, 180, 60) : color(120, 200, 140));
-    fill(have ? vCol : colDim); textAlign(RIGHT, TOP); textSize(10);
-    text(!have ? "—" : (nf(c, 1, 0) + "°C" + (ntcTripped ? " ⚠" : "")), x + w - 12, y);
-    tipZone(x, y - 2, w, 18, strings.get("Живая температура мотора. Порог критического отключения FFB — на вкладке «Настройки».", "Live motor temperature. The FFB critical cutoff threshold is on the Settings tab."));
-  }
-
-  // dustin's rig, added — live motor current row (BTS7960 IS pin), shown next to motor temp
-  void drawMotorCurrentRow(float x, float y, float w) {
-    fill(colDim); textAlign(LEFT, TOP); textSize(10); text(strings.get("Ток мотора", "Motor current"), x + 12, y);
-    boolean have = motorCurrentMA >= 0;
-    float amps = have ? motorCurrentMA / 1000.0 : 0;
-    color vCol = amps > 30 ? color(220, 70, 70) : (amps > 20 ? color(220, 180, 60) : color(120, 200, 140));
-    fill(have ? vCol : colDim); textAlign(RIGHT, TOP); textSize(10);
-    text(!have ? "—" : (nf(amps, 1, 1) + "A"), x + w - 12, y);
-    tipZone(x, y - 2, w, 18, strings.get("Живой ток мотора через IS-пин BTS7960 (не то же самое, что Global Gain — это настройка, а не измерение).", "Live motor current via the BTS7960 IS pin (not the same as Global Gain — that's a setting, this is a measurement)."));
-  }
   void drawWrapped(String s, float x, float y, float w, float lh) {
     textAlign(LEFT, TOP);
     String[] words = split(s, ' '); String cur = ""; float yy = y;
@@ -294,19 +277,25 @@ class DashboardTab {
 
     // dustin's rig, redesigned — invert/disable as full-width labeled pill toggles (was two
     // unlabeled 14x14 mini-checkboxes, too small/unclear). Own row, scales with card height.
+    // Рисуем только если прошивка собрана с USE_AXIS_TWEAKS (буква 'v') — иначе команды
+    // I/D ей неизвестны и каждый клик давал бы таймаут в очереди.
     float rowBY = y + h * 0.42;
     axPillH = max(20, h * 0.19);
-    float pillGap = 8;
-    axPillW = (w - 24 - pillGap) / 2.0;
-    float invX = x + 12, disX = invX + axPillW + pillGap;
-    axInvX[i] = invX; axInvY[i] = rowBY;
-    axDisX[i] = disX; axDisY[i] = rowBY;
-    boolean invOn = bitReadByte(axisInvertMask, i) == 1;
-    boolean disOn = bitReadByte(axisDisableMask, i) == 1;
-    drawTogglePill(invX, rowBY, axPillW, axPillH, strings.get("Инверсия", "Invert"), invOn, color(70, 140, 210));
-    drawTogglePill(disX, rowBY, axPillW, axPillH, strings.get("Откл. ось", "Disable axis"), disOn, color(210, 80, 80));
-    tipZone(invX, rowBY, axPillW, axPillH, strings.get("Инвертировать направление оси (команда I)", "Invert this axis' direction (command I)"));
-    tipZone(disX, rowBY, axPillW, axPillH, strings.get("Отключить ось — зафиксировать в нейтрали (команда D)", "Disable this axis — force it to neutral (command D)"));
+    if (fwHas("v")) {
+      float pillGap = 8;
+      axPillW = (w - 24 - pillGap) / 2.0;
+      float invX = x + 12, disX = invX + axPillW + pillGap;
+      axInvX[i] = invX; axInvY[i] = rowBY;
+      axDisX[i] = disX; axDisY[i] = rowBY;
+      boolean invOn = bitReadByte(axisInvertMask, i) == 1;
+      boolean disOn = bitReadByte(axisDisableMask, i) == 1;
+      drawTogglePill(invX, rowBY, axPillW, axPillH, strings.get("Инверсия", "Invert"), invOn, color(70, 140, 210));
+      drawTogglePill(disX, rowBY, axPillW, axPillH, strings.get("Откл. ось", "Disable axis"), disOn, color(210, 80, 80));
+      tipZone(invX, rowBY, axPillW, axPillH, strings.get("Инвертировать направление оси (команда I)", "Invert this axis' direction (command I)"));
+      tipZone(disX, rowBY, axPillW, axPillH, strings.get("Отключить ось — зафиксировать в нейтрали (команда D)", "Disable this axis — force it to neutral (command D)"));
+    } else {
+      axInvX[i] = -9999; axDisX[i] = -9999; // мимо любых кликов
+    }
 
     // полоса
     float bX = x + 12, bW = w - 24, bY = rowBY + axPillH + max(6, h * 0.06);
@@ -367,26 +356,17 @@ class DashboardTab {
     }
   }
 
-  // dustin's rig, added — is the connected firmware's "General Gain" slot (idx 1) actually a
-  // hard current limit (letter 'q')? If so the slider below is fully repurposed: amps instead
-  // of a %, sends 'K' instead of 'FG'. Real gain % stays untouched/unreachable in that case —
-  // per dustin's explicit ask, this is a cap on current, not a force multiplier anymore.
-  boolean isCurrentLimitSlot(int idx) {
-    return idx == 1 && fw != null && fw.optionLetters != null && fw.optionLetters.contains("q");
-  }
-
   void drawControl(int i, float x, float y, float w, float h) {
     int idx = ctlIdx[i];
-    boolean curLimit = isCurrentLimitSlot(idx);
-    float g = curLimit ? (currentLimitRaw >= 1023 ? CURRENT_LIMIT_MAX_A : min(currentRawToAmps(currentLimitRaw), CURRENT_LIMIT_MAX_A)) : effects[idx].gain;
-    float cMin = curLimit ? 0 : ctlMin[i];
-    float cMax = curLimit ? CURRENT_LIMIT_MAX_A : ctlMax[i];
+    float g = effects[idx].gain;
+    float cMin = ctlMin[i];
+    float cMax = ctlMax[i];
     float ratio = constrain((g - cMin) / (cMax - cMin), 0, 1);
     card(x, y, w, h);
     ctlCardX[i] = x; ctlCardY[i] = y; ctlCardW[i] = w; ctlCardH[i] = h;
 
     float titleX = x + 12;
-    if (!curLimit && isDesktopToggle(idx)) {
+    if (isDesktopToggle(idx)) {
       // маленький чекбокс: включить эффект как постоянный поверх игры (desktop-эффект)
       ctlChkX[i] = x + 12; ctlChkY[i] = y + 9;
       boolean on = effects[idx].userEnabled;
@@ -404,28 +384,19 @@ class DashboardTab {
       ctlChkX[i] = -1;
     }
 
-    String title = curLimit ? strings.get("Макс. ток мотора", "Max Motor Current") : ctlName[i];
-    fill(colText); textAlign(LEFT, TOP); textSize(12); text(title, titleX, y + 9);
-    fill(curLimit ? color(220, 150, 60) : colAcc); textAlign(RIGHT, TOP); textSize(13);
-    String vs, un;
-    if (curLimit) {
-      vs = (currentLimitRaw >= 1023) ? strings.get("выкл", "off") : nf(g, 1, 1); un = (currentLimitRaw >= 1023) ? "" : "A";
-    } else {
-      vs = (idx == 0 || idx == 11) ? str(int(g)) : (idx == 10) ? nf(g, 1, 1) : str(int(g * 100));
-      un = (idx == 0) ? "°" : (idx == 11) ? "" : "%";
-    }
+    fill(colText); textAlign(LEFT, TOP); textSize(12); text(ctlName[i], titleX, y + 9);
+    fill(colAcc); textAlign(RIGHT, TOP); textSize(13);
+    String vs = (idx == 0 || idx == 11) ? str(int(g)) : (idx == 10) ? nf(g, 1, 1) : str(int(g * 100));
+    String un = (idx == 0) ? "°" : (idx == 11) ? "" : "%";
     text(vs + un, x + w - 12, y + 8);
 
     float tX = x + 12, tW = w - 24, tY = y + 34, tH = 8;
     ctlTrkX[i] = tX; ctlTrkY[i] = tY; ctlTrkW[i] = tW;
     fill(16); noStroke(); rect(tX, tY, tW, tH, 4);
-    fill(curLimit ? color(220, 150, 60) : colAcc); rect(tX, tY, tW * ratio, tH, 4);
+    fill(colAcc); rect(tX, tY, tW * ratio, tH, 4);
     fill(235); ellipse(tX + tW * ratio, tY + tH / 2, 14, 14);
 
-    String tip = curLimit
-      ? strings.get("Жёсткий предел тока мотора через IS-пин BTS7960. FFB никогда не превысит этот ток. Крайнее правое положение = без лимита.", "Hard motor current cap via the BTS7960 IS pin. FFB torque never exceeds this current. All the way right = no limit.")
-      : ctlTip[i];
-    fill(colDim); textSize(9); drawWrapped(tip, x + 12, y + 50, w - 24, 12);
+    fill(colDim); textSize(9); drawWrapped(ctlTip[i], x + 12, y + 50, w - 24, 12);
   }
 
   // ============ ВВОД ============
@@ -484,18 +455,6 @@ class DashboardTab {
     int i = dragCtl, idx = ctlIdx[i];
     float rx = ctlTrkX[i], rw = ctlTrkW[i];
     float ratio = constrain((mouseX - rx) / rw, 0, 1);
-    if (isCurrentLimitSlot(idx)) {
-      // dustin's rig, added — this slot is a hard current cap on 'q' boards, not a % gain.
-      // All the way right (ratio==1) means "no limit" (raw sentinel 1023), not "max amps".
-      if (ratio >= 0.995) {
-        currentLimitRaw = 1023;
-      } else {
-        float amps = ratio * CURRENT_LIMIT_MAX_A;
-        currentLimitRaw = int(constrain(currentAmpsToRaw(amps), 0, 1022));
-      }
-      proto.setParam("K ", currentLimitRaw);
-      return;
-    }
     float g = ctlMin[i] + ratio * (ctlMax[i] - ctlMin[i]);
     if (idx == 0) g = round(g / 5.0) * 5;
     if (idx == 11) g = round(g);
@@ -507,10 +466,15 @@ class DashboardTab {
     if (hov(wheelBtnX, wheelBtnY, wheelBtnW, wheelBtnH)) {
       proto.center(); Log.info("AXIS", strings.get("Центрирование руля", "Wheel centered")); return;
     }
-    // сброс калибровки осей
+    // сброс калибровки осей: в прошивке НЕТ команды сброса ('YR' — это чтение
+    // калибровки), поэтому явно шлём мин=0 и макс=adMax по каждой оси (YA..YH)
     if (hov(resetBtnX, resetBtnY, resetBtnW, resetBtnH)) {
       for (int i = 0; i < 5; i++) { calMin[i] = 0; calMax[i] = adMax; }
-      proto.sendNow("YR"); proto.requestAutosave(); Log.info("AXIS", strings.get("Сброс калибровки осей", "Axis calibration reset")); return;
+      for (int i = 1; i < 5; i++) {
+        proto.setParam(cmdMin[i], 0);
+        proto.setParam(cmdMax[i], int(adMax));
+      }
+      Log.info("AXIS", strings.get("Сброс калибровки осей", "Axis calibration reset")); return;
     }
     // клик по роли оси — сменить функцию (со свопом). Ось 0 (X) пропускаем:
     // это аппаратный энкодер руля, роль «Руль» с неё снимать нельзя — иначе

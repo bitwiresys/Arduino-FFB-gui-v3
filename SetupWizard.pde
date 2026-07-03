@@ -6,7 +6,10 @@
 class SetupWizard {
   boolean active = false;
   int step = 0;
-  // wizard steps: 0=welcome  1=COM select  2=firmware  3=bind  4=done
+  // wizard steps: 0=welcome  1=auto board search  2=auto firmware install  3=bind  4=done
+  // Никаких «тыкалок» с портами: мастер сам ищет плату по всем COM-портам
+  // (в т.ч. совсем без прошивки — по появлению нового порта), сам определяет
+  // конфигурацию по буквам ответа 'V' и сам ставит подходящую прошивку с GitHub.
 
   // colors (matches v3 dark theme)
   int colBg    = color(24, 24, 30);
@@ -27,12 +30,23 @@ class SetupWizard {
   // state
   boolean hidFound = false;
   String hidName = "";
-  ControlDevice[] hidDevices = new ControlDevice[0];
-  int selHID = -1;
-  String[] comPorts = new String[0];
-  int selPort = -1;
   String fwVersion = "";
   int fwNum = 0;
+
+  // ---- автопоиск платы (шаг 1) ----
+  HashSet<String> portsAtStart = new HashSet<String>();  // порты, существовавшие до подключения платы
+  volatile boolean scanBusy = false;
+  volatile String scanStatus = "";
+  volatile String foundPort = null;     // порт найденной платы
+  volatile String foundFwLine = null;   // строка "fw-v..." (null = плата без нашей прошивки)
+  boolean scanHandled = false;          // результат уже обработан в draw()
+  int scanRound = 0;
+
+  // ---- автопрошивка (шаг 2) ----
+  boolean blankBoard = false;           // плата была без прошивки — ставили с нуля
+  boolean fwStepStarted = false;
+  boolean fwSkipOffered = false;
+  int fwStepFrames = 0;
 
   // features from firmware
   ArrayList<String> featureList = new ArrayList<String>();
@@ -52,6 +66,11 @@ class SetupWizard {
   int fwWaitFrames = 0;
   boolean fwRequestSent = false;
 
+  // защёлка кнопок: btn() раньше срабатывал каждый кадр, пока держишь мышь
+  // (mousePressed — состояние, а не событие), из-за чего клики «проваливались»
+  // сквозь сменившийся экран и действия выполнялись многократно
+  boolean btnLatch = false;
+
   SetupWizard() {
     papplet = wheel_control_v3.this;
   }
@@ -66,6 +85,19 @@ class SetupWizard {
     scrollY = 0;
     fwWaitFrames = 0;
     fwRequestSent = false;
+    foundPort = null;
+    foundFwLine = null;
+    scanHandled = false;
+    blankBoard = false;
+    fwStepStarted = false;
+    fwSkipOffered = false;
+    fwStepFrames = 0;
+    firmwareUpdater.autoFlash = true; // в мастере прошиваем сразу, без тостов
+  }
+
+  void finish() {
+    active = false;
+    firmwareUpdater.autoFlash = false;
   }
 
   void addLog(String s) {
@@ -76,6 +108,7 @@ class SetupWizard {
   // ============ MAIN DRAW ============
   void draw() {
     if (!active) return;
+    if (!mousePressed) btnLatch = false; // кнопка отпущена — снова разрешаем клики btn()
     updateFwPoll();
     pushStyle();
 
@@ -105,7 +138,7 @@ class SetupWizard {
     text(strings.get("Настройка Wheel Control v3.0", "Wheel Control v3.0 Setup"), px + 16, py + 21);
 
     // step indicator
-    String[] stepNames = {"", "HID", "COM", strings.get("Прошивка", "Firmware"), strings.get("Привязка", "Binding"), ""};
+    String[] stepNames = {"", strings.get("Поиск платы", "Board search"), strings.get("Прошивка", "Firmware"), strings.get("Привязка", "Binding"), ""};
     float sx = px + pw - 200;
     textAlign(RIGHT, CENTER);
     textSize(11);
@@ -125,7 +158,7 @@ class SetupWizard {
 
     switch (step) {
       case 0: drawWelcome(cx, cy, cw, ch); break;
-      case 1: drawCOM(cx, cy, cw, ch); break;
+      case 1: drawScan(cx, cy, cw, ch); break;
       case 2: drawFirmware(cx, cy, cw, ch); break;
       case 3: drawFeatures(cx, cy, cw, ch); break;
       case 4: drawDone(cx, cy, cw, ch); break;
@@ -155,114 +188,227 @@ class SetupWizard {
     y += 32;
     fill(colDim);
     textSize(13);
-    text(strings.get("Первый запуск. Настройка подключения к Arduino FFB Wheel.", "First run. Setting up Arduino FFB Wheel connection."), x, y);
-    y += 24;
-    text(strings.get("Убедитесь, что плата подключена по USB.", "Make sure the board is connected via USB."), x, y);
+    text(strings.get("Первый запуск. Мастер всё сделает сам:", "First run. The wizard does everything automatically:"), x, y);
+    y += 26;
+    text(strings.get("• найдёт плату Arduino Leonardo (прошита она или нет — неважно);", "• finds your Arduino Leonardo board (flashed or blank — doesn't matter);"), x, y); y += 20;
+    text(strings.get("• определит её конфигурацию;", "• detects its configuration;"), x, y); y += 20;
+    text(strings.get("• подберёт и установит подходящую прошивку с официального репозитория.", "• picks and installs the matching firmware from the official repository."), x, y); y += 32;
+    fill(colText);
+    text(strings.get("Подключите плату по USB и нажмите «Начать».", "Plug the board in via USB and press Start."), x, y);
     y += 40;
     if (btn(x + w / 2 - btnW / 2, y, btnW, btnH, strings.get("Начать", "Start"), colBtn)) {
-      step = 1;
-      doDiscoverCOM();
+      beginSearch();
     }
   }
 
-  // ============ STEP 1: COM ============
-  void drawCOM(float x, float y, float w, float h) {
+  // Запуск шага 1: запоминаем текущий список портов (чтобы заметить НОВЫЙ порт,
+  // когда пользователь воткнёт непрошитую плату) и начинаем циклический опрос.
+  void beginSearch() {
+    step = 1;
+    foundPort = null;
+    foundFwLine = null;
+    scanHandled = false;
+    scanRound = 0;
+    portsAtStart.clear();
+    try { for (String p : jssc.SerialPortList.getPortNames()) portsAtStart.add(p); } catch (Throwable t) {}
+    scanStatus = strings.get("Поиск платы...", "Searching for the board...");
+    addLog(strings.get("Поиск платы по всем портам...", "Scanning all ports for the board..."));
+  }
+
+  // ============ STEP 1: Автопоиск платы ============
+  void drawScan(float x, float y, float w, float h) {
     textAlign(LEFT, TOP);
     fill(colText);
     textSize(15);
-    text(strings.get("Шаг 1: Выбор COM-порта", "Step 1: Select COM Port"), x, y);
+    text(strings.get("Шаг 1: Поиск платы (автоматически)", "Step 1: Board search (automatic)"), x, y);
     y += 36;
 
-    if (comPorts.length == 0) {
-      fill(colErr);
-      textSize(13);
-      text(strings.get("COM-порты не найдены", "No COM ports found"), x, y);
-      y += 30;
-      if (btn(x + w / 2 - 80, y, 160, btnH, strings.get("Обновить", "Refresh"), colBtn)) {
-        doDiscoverCOM();
-      }
+    // обработка результата фонового скана
+    if (foundPort != null && !scanHandled) {
+      scanHandled = true;
+      onBoardFound();
       return;
     }
 
-    fill(colDim);
-    textSize(12);
-    text(strings.get("Найдено: ", "Found: ") + comPorts.length + "  —  " + strings.get("выберите порт Arduino:", "select Arduino port:"), x, y);
-    y += 24;
+    // раз в ~1.5 с запускаем очередной проход по портам
+    if (!scanBusy && foundPort == null && frameCount % 90 == 0) scanOnce();
 
-    float itemH = 32;
-    float listW = w - 8;
-    float maxItems = min(comPorts.length, (int)((h - 120) / (itemH + 3)));
-
-    for (int i = 0; i < comPorts.length && i < maxItems; i++) {
-      float iy = y + i * (itemH + 3);
-      boolean hov = mouseX >= x + 4 && mouseX <= x + 4 + listW && mouseY >= iy && mouseY <= iy + itemH;
-      boolean sel = (i == selPort);
-
-      fill(sel ? colAcc : (hov ? colItemH : colItem));
-      noStroke();
-      rect(x + 4, iy, listW, itemH, 4);
-
-      fill(sel ? 255 : colText);
-      textAlign(LEFT, CENTER);
-      textSize(13);
-      text(comPorts[i], x + 16, iy + itemH / 2);
-
-      // radio
-      float rx = x + listW - 8;
-      noFill();
-      stroke(sel ? 255 : colDim);
-      strokeWeight(1.5);
-      ellipse(rx, iy + itemH / 2, 14, 14);
-      if (sel) { fill(255); noStroke(); ellipse(rx, iy + itemH / 2, 7, 7); }
+    // анимированный индикатор
+    fill(colAcc); noStroke();
+    float t = millis() / 400.0;
+    for (int i = 0; i < 3; i++) {
+      float a = 4 + 3 * sin(t + i * 0.9);
+      ellipse(x + 12 + i * 22, y + 8, a, a);
     }
+    fill(colText); textSize(13);
+    text(scanStatus, x + 80, y);
+    y += 34;
+    fill(colDim); textSize(12);
+    text(strings.get("Подключите плату Arduino Leonardo по USB — мастер найдёт её сам.", "Plug the Arduino Leonardo board in via USB — the wizard will find it."), x, y); y += 20;
+    text(strings.get("Если плата была подключена заранее и не находится — передёрните USB-кабель.", "If the board was already plugged in and isn't found — re-plug the USB cable."), x, y); y += 20;
+    text(strings.get("Плата без прошивки тоже подойдёт: прошивка будет установлена на следующем шаге.", "A blank board works too: firmware will be installed on the next step."), x, y);
+  }
 
-    float btnY = y + comPorts.length * (itemH + 3) + 12;
-    if (btnY + btnH > y + h - 10) btnY = y + h - btnH - 10;
-
-      if (btn(x + w / 2 - btnW - 8, btnY, btnW, btnH, strings.get("Обновить", "Refresh"), colBtnO)) {
-      doDiscoverCOM();
-    }
-    if (selPort >= 0) {
-      if (btn(x + w / 2 + 8, btnY, btnW, btnH, strings.get("Подключить", "Connect"), colBtn)) {
-        doConnect();
+  // Один проход поиска: 1) порт, отвечающий на 'V' — наша плата с прошивкой;
+  // 2) порт, появившийся после старта мастера — плата без прошивки (или с чужой).
+  void scanOnce() {
+    scanBusy = true;
+    scanRound++;
+    Thread t = new Thread(new Runnable() {
+      public void run() {
+        try {
+          String[] ports = jssc.SerialPortList.getPortNames();
+          for (String p : ports) {
+            String line = probeFwVersionLine(p);
+            if (line != null) { foundFwLine = line; foundPort = p; return; }
+          }
+          for (String p : ports) {
+            if (!portsAtStart.contains(p)) { foundFwLine = null; foundPort = p; return; }
+          }
+          scanStatus = strings.get("Плата не найдена. Подключите её по USB... (попытка " + scanRound + ")",
+                                   "Board not found. Plug it in via USB... (attempt " + scanRound + ")");
+        } catch (Throwable tt) {
+          scanStatus = strings.get("Ошибка поиска: ", "Scan error: ") + tt.getMessage();
+        } finally {
+          scanBusy = false;
+        }
       }
+    });
+    t.setDaemon(true);
+    t.start();
+  }
+
+  // Плата найдена: сохраняем порт, подключаемся (если есть прошивка) и уходим на шаг 2
+  void onBoardFound() {
+    try { saveStrings(papplet.dataPath("COM_cfg.txt"), new String[]{foundPort}); } catch (Throwable t) {}
+    if (foundFwLine != null) {
+      blankBoard = false;
+      addLog(strings.get("Плата найдена: ", "Board found: ") + foundPort + "  (" + foundFwLine + ")");
+      if (serial.connect(foundPort, 115200)) {
+        attachHID();
+        requestDeviceState(); // ответ 'V' запустит firmwareUpdater.checkForUpdate() (autoFlash)
+      } else {
+        addLog(strings.get("Не удалось открыть порт", "Failed to open the port"));
+      }
+    } else {
+      blankBoard = true;
+      addLog(strings.get("Найдена плата без прошивки: ", "Found a board without firmware: ") + foundPort);
+      // конфигурацию не спросить — ставим последний релиз в конфигурации по умолчанию
+      firmwareUpdater.installFresh(foundPort, FirmwareUpdater.DEFAULT_LETTERS);
+    }
+    step = 2;
+    fwStepStarted = true;
+    fwStepFrames = 0;
+  }
+
+  // Автопоиск HID-устройства руля (как раньше делал doConnect)
+  void attachHID() {
+    try {
+      if (control == null) control = ControlIO.getInstance(papplet);
+      java.util.List<ControlDevice> devList = control.getDevices();
+      for (ControlDevice dev : devList) {
+        String n = trim(dev.getName());
+        if (n.toLowerCase().contains("arduino")) {
+          gpad = dev;
+          gpad.open();
+          hidFound = true;
+          hidName = n;
+          addLog("HID: " + n);
+          break;
+        }
+      }
+      if (!hidFound) addLog(strings.get("HID не найден (не критично)", "HID not found (not critical)"));
+    } catch (Throwable t) {
+      addLog("HID: " + t.getMessage());
     }
   }
 
-  // ============ STEP 2: Firmware ============
+  // ============ STEP 2: Прошивка (автоматически) ============
   void drawFirmware(float x, float y, float w, float h) {
     textAlign(LEFT, TOP);
     fill(colText);
     textSize(15);
-    text(strings.get("Шаг 2: Прошивка", "Step 2: Firmware"), x, y);
+    text(strings.get("Шаг 2: Прошивка (автоматически)", "Step 2: Firmware (automatic)"), x, y);
     y += 36;
+    fwStepFrames++;
+
+    // подтягиваем распознанную версию из глобального парсера
+    if (fw != null && fw.fullVersionString != null && fw.fullVersionString.length() > 0) {
+      if (!fwVersion.equals(fw.fullVersionString)) {
+        fwVersion = fw.fullVersionString;
+        fwNum = fw.versionNumber;
+        featureList.clear();
+        buildFeatureList();
+      }
+    }
+
+    boolean fwReady = serial.isConnected() && fw != null && fw.versionNumber > 0;
 
     textSize(13);
-    if (fwVersion.length() > 0) {
+    if (firmwareUpdater.flashing) {
+      fill(colWarn);
+      text(strings.get("Установка прошивки — не отключайте плату...", "Installing firmware — do not unplug the board..."), x, y);
+      y += 24;
+    } else if (firmwareUpdater.lastFlashFinished && !firmwareUpdater.lastFlashOk) {
+      fill(colErr);
+      text(strings.get("Не удалось установить прошивку (см. журнал ниже).", "Failed to install firmware (see the log below)."), x, y);
+      y += 34;
+      if (btn(x, y, 180, btnH, strings.get("Повторить", "Retry"), colBtn)) {
+        if (blankBoard) firmwareUpdater.installFresh(foundPort, FirmwareUpdater.DEFAULT_LETTERS);
+        else firmwareUpdater.startUpdate();
+      }
+      if (fwReady && btn(x + 200, y, 180, btnH, strings.get("Пропустить", "Skip"), colBtnO)) {
+        advanceToBinding();
+      }
+      y += btnH + 10;
+    } else if (fwReady && (firmwareUpdater.upToDate || firmwareUpdater.lastFlashOk || firmwareUpdater.checkFailed)) {
+      // готово: либо уже последняя сборка, либо только что прошили, либо нет сети (едем дальше как есть)
       fill(colOk);
-      text("  ✓  ", x, y);
-      fill(colText);
-      text(fwVersion + "  (v" + fwNum + ")", x + 30, y);
-      y += 30;
-      fill(colDim);
-      textSize(12);
-      text(strings.get("Определены функции:", "Detected features:"), x + 8, y);
-      y += 22;
-      fill(colText);
-      textSize(12);
-      for (int i = 0; i < featureList.size(); i++) {
-        text("  •  " + featureList.get(i), x + 12, y);
-        y += 18;
-      }
-      y += 16;
-      if (btn(x + w / 2 - btnW / 2, y, btnW, btnH, strings.get("Далее", "Next"), colBtn)) {
-        step = 3;
-        buildButtonAxisMap();
-      }
+      String okMsg = firmwareUpdater.lastFlashOk ? strings.get("Прошивка установлена: ", "Firmware installed: ") + fwVersion
+                   : firmwareUpdater.upToDate    ? strings.get("Прошивка актуальна: ", "Firmware is up to date: ") + fwVersion
+                   : strings.get("Нет сети — оставляю текущую прошивку: ", "No network — keeping current firmware: ") + fwVersion;
+      text("  ✓  " + okMsg, x, y);
+      y += 26;
+      addLogOnce(okMsg);
+      advanceToBinding();
+      return;
     } else {
       fill(colWarn);
-      text(strings.get("Ожидание ответа от Arduino...", "Waiting for Arduino response..."), x, y);
+      text(blankBoard ? strings.get("Подготовка установки прошивки...", "Preparing firmware installation...")
+                      : strings.get("Проверка версии и обновление...", "Checking version and updating..."), x, y);
+      y += 24;
     }
+
+    if (fwVersion.length() > 0) {
+      fill(colDim); textSize(12);
+      text(strings.get("Обнаружено: ", "Detected: ") + fwVersion + "  (v" + fwNum + ")", x, y);
+      y += 20;
+      for (int i = 0; i < featureList.size(); i++) {
+        text("  •  " + featureList.get(i), x + 6, y);
+        y += 17;
+      }
+    }
+
+    // страховка: если через ~60 с ничего не решилось — даём выйти вручную
+    if (fwStepFrames > 3600 && !firmwareUpdater.flashing) {
+      float byy = y + 16;
+      if (fwReady) {
+        if (btn(x, byy, 220, btnH, strings.get("Продолжить без обновления", "Continue without updating"), colBtnO)) advanceToBinding();
+      } else {
+        if (btn(x, byy, 220, btnH, strings.get("Начать поиск заново", "Restart the search"), colBtnO)) beginSearch();
+      }
+    }
+  }
+
+  String lastOnceMsg = "";
+  void addLogOnce(String m) {
+    if (!m.equals(lastOnceMsg)) { lastOnceMsg = m; addLog(m); }
+  }
+
+  void advanceToBinding() {
+    step = 3;
+    buildButtonAxisMap();
+    if (gpad == null) attachHID(); // после прошивки «чистой» платы HID появился только что
   }
 
   // ---- состояние привязки + калибровки осей (горизонтальные строки) ----
@@ -457,11 +603,11 @@ class SetupWizard {
       int i = releasedAxis;
       if (releasedIsMin && i >= 1 && calCmdMin[i].length() > 0) {
         int val = round(calMin[i] * calAdMax);
-        serial.sendImmediate(calCmdMin[i] + " " + str(val));
+        proto.setParam(calCmdMin[i] + " ", val); // через очередь + автосохранение
         addLog(calCmdMin[i] + " = " + val);
       } else if (!releasedIsMin && i >= 1 && calCmdMax[i].length() > 0) {
         int val = round(calMax[i] * calAdMax);
-        serial.sendImmediate(calCmdMax[i] + " " + str(val));
+        proto.setParam(calCmdMax[i] + " ", val);
         addLog(calCmdMax[i] + " = " + val);
       }
       releasedAxis = -1;
@@ -482,22 +628,20 @@ class SetupWizard {
     y += 36;
     fill(colText);
     textSize(13);
-    String portName = (selPort >= 0 && selPort < comPorts.length) ? comPorts[selPort] : "?";
-    text("COM: " + portName, x, y); y += 22;
+    text("COM: " + (foundPort != null ? foundPort : "?"), x, y); y += 22;
     text("FW:  " + fwVersion, x, y); y += 22;
     text(strings.get("Конфиг сохранён в data/COM_cfg.txt", "Config saved to data/COM_cfg.txt"), x, y);
     y += 50;
     if (btn(x + w / 2 - btnW / 2, y, btnW, btnH, strings.get("Готово", "Done"), colOk)) {
-      active = false;
+      finish();
       // re-init serial with saved config
       try {
         File f = new File(papplet.dataPath("COM_cfg.txt"));
         if (f.exists()) {
           String[] port = papplet.loadStrings("COM_cfg.txt");
           if (port != null && port.length > 0) {
-            serial.connect(port[0], 115200);
-            serial.enqueueCommand("V");
-            serial.enqueueCommand("U");
+            if (!serial.isConnected()) serial.connect(trim(port[0]), 115200);
+            requestDeviceState();
           }
         }
       } catch (Throwable t) {
@@ -507,126 +651,9 @@ class SetupWizard {
   }
 
   // ============ ACTIONS ============
-  void doHIDCheck() {
-    addLog(strings.get("Поиск HID...", "Searching for HID..."));
-    try {
-      control = ControlIO.getInstance(papplet);
-      java.util.List<ControlDevice> devList = control.getDevices();
-      ControlDevice[] devs = devList.toArray(new ControlDevice[0]);
-      hidDevices = devs;
-      hidFound = false;
-      hidName = "";
-      StringBuilder sb = new StringBuilder(strings.get("Найдено: ", "Found: ") + devs.length + strings.get(" устройств", " devices"));
-      addLog(sb.toString());
-      for (int i = 0; i < devs.length; i++) {
-        String n = trim(devs[i].getName());
-        addLog("  " + (i+1) + ". " + n);
-        if (n.toLowerCase().contains("arduino")) {
-          hidFound = true;
-          hidName = n;
-          gpad = devs[i];
-          gpad.open();
-        }
-      }
-      if (!hidFound && devs.length > 0) {
-        // No Arduino by name — let user pick in step 1b
-        addLog(strings.get("Arduino не определён по имени, выберите вручную", "Arduino not identified by name, please select manually"));
-      }
-    } catch (Throwable t) {
-      hidFound = false;
-      addLog(strings.get("HID ошибка: ", "HID error: ") + t.getMessage());
-    }
-  }
-
-  void doDiscoverCOM() {
-    addLog(strings.get("Поиск COM...", "Searching for COM ports..."));
-    try {
-      comPorts = Serial.list();
-      selPort = -1;
-      addLog(strings.get("Найдено портов: ", "Ports found: ") + comPorts.length);
-    } catch (Throwable t) {
-      comPorts = new String[0];
-      addLog(strings.get("Ошибка: ", "Error: ") + t.getMessage());
-    }
-  }
-
-  void doConnect() {
-    if (selPort < 0 || selPort >= comPorts.length) return;
-    String portName = comPorts[selPort];
-    addLog(strings.get("Подключение к ", "Connecting to ") + portName + "...");
-
-    try {
-      if (serial.connect(portName, 115200)) {
-        addLog("OK: " + portName);
-        // Auto-detect HID device by name
-        try {
-          if (control == null) control = ControlIO.getInstance(papplet);
-          java.util.List<ControlDevice> devList = control.getDevices();
-          for (ControlDevice dev : devList) {
-            String n = trim(dev.getName());
-            if (n.toLowerCase().contains("arduino")) {
-              gpad = dev;
-              gpad.open();
-              hidFound = true;
-              hidName = n;
-              addLog("HID: " + n);
-              break;
-            }
-          }
-          if (!hidFound) addLog(strings.get("HID не найден (не критично)", "HID not found (not critical)"));
-        } catch (Throwable t) {
-          addLog("HID: " + t.getMessage());
-        }
-
-        step = 2;
-        // Send "V" directly — enqueue might not work if queue is busy
-        serial.sendImmediate("V");
-        fwRequestSent = true;
-        fwWaitFrames = 0;
-      } else {
-        addLog(strings.get("Ошибка подключения", "Connection error"));
-      }
-    } catch (Throwable t) {
-      addLog(strings.get("Ошибка: ", "Error: ") + t.getMessage());
-    }
-  }
-
-  // Called every frame from draw() when step==2 (firmware) and waiting for fw
-  void updateFwPoll() {
-    if (step != 2 || !fwRequestSent) return;
-    fwWaitFrames++;
-
-    // Check lastLine from serialEvent (safe — no port stealing)
-    if (serial.lastLine != null && serial.lastLine.startsWith("fw-")) {
-      fwVersion = serial.lastLine.trim();
-      serial.lastLine = null;
-      fw.parse(fwVersion);
-      fwNum = fw.versionNumber;
-      addLog("FW: " + fwVersion);
-      featureList.clear();
-      buildFeatureList();
-      fwRequestSent = false;
-      return;
-    }
-
-    // Also check lastRead from serialEvent
-    if (serial.lastRead != null && serial.lastRead.startsWith("fw-")) {
-      fwVersion = serial.lastRead.trim();
-      fw.parse(fwVersion);
-      fwNum = fw.versionNumber;
-      addLog("FW: " + fwVersion);
-      featureList.clear();
-      buildFeatureList();
-      fwRequestSent = false;
-      return;
-    }
-
-    // Timeout after ~5 seconds (300 frames at 60fps)
-    if (fwWaitFrames > 300) {
-      addLog(strings.get("FW не отвечает — попробуйте перезалить прошивку", "FW not responding — try reflashing the firmware"));
-      fwRequestSent = false;
-    }
-  }
+  // (устаревшие doHIDCheck/doDiscoverCOM/doConnect/updateFwPoll удалены: порт больше не выбирается
+  // вручную, версия прошивки подтягивается из глобального парсера в drawFirmware)
+  void updateFwPoll() { }
 
   void buildFeatureList() {
     if (fw.hatSwitch) featureList.add("Hat Switch (D-pad)");
@@ -643,7 +670,6 @@ class SetupWizard {
     if (fw.splitAxis) featureList.add("Split Z-axis");
     if (fw.hardwareCenter) featureList.add(strings.get("HW кнопка центрирования", "HW center button"));
     if (fw.analogFFB) featureList.add(strings.get("Аналоговый FFB выход", "Analog FFB output"));
-    if (fw.proMicroPins) featureList.add(strings.get("ProMicro распиновка", "ProMicro pinout"));
     if (featureList.size() == 0) featureList.add(strings.get("Базовая прошивка (без опций)", "Basic firmware (no options)"));
   }
 
@@ -684,7 +710,10 @@ class SetupWizard {
 
   void saveConfig() {
     try {
-      saveStrings("data/COM_cfg.txt", new String[]{comPorts[selPort]});
+      if (foundPort == null || foundPort.length() == 0) { addLog(strings.get("Порт не определён", "Port unknown")); return; }
+      // dataPath, а не относительный путь: в упакованном приложении рабочая папка
+      // может не совпадать с папкой data/, из-за чего конфиг «терялся»
+      saveStrings(papplet.dataPath("COM_cfg.txt"), new String[]{foundPort});
       addLog(strings.get("COM_cfg.txt сохранён", "COM_cfg.txt saved"));
     } catch (Throwable t) {
       addLog(strings.get("Ошибка сохранения: ", "Save error: ") + t.getMessage());
@@ -701,7 +730,9 @@ class SetupWizard {
     textAlign(CENTER, CENTER);
     textSize(13);
     text(label, x + w / 2, y + h / 2);
-    return hov && mousePressed;
+    boolean fired = hov && mousePressed && !btnLatch;
+    if (fired) btnLatch = true; // одно срабатывание на одно нажатие
+    return fired;
   }
 
   // ============ MOUSE ============
@@ -711,22 +742,7 @@ class SetupWizard {
     float ph = min(540, WIN_H - 40);
     float px = (WIN_W - pw) / 2;
     float py = (WIN_H - ph) / 2;
-    float cx = px + 20;
-    float listW = pw - 48;
-    float itemH = 36;
-
-    if (step == 1) {
-      // COM port selection
-      float cy = py + 58 + 60;
-      float maxItems = min(comPorts.length, (int)((ph - 130 - 120) / (itemH + 3)));
-      for (int i = 0; i < comPorts.length && i < maxItems; i++) {
-        float iy = cy + i * (itemH + 3);
-        if (mouseX >= cx + 4 && mouseX <= cx + 4 + listW && mouseY >= iy && mouseY <= iy + itemH) {
-          selPort = i;
-          return;
-        }
-      }
-    }
+    // шаг 1 теперь полностью автоматический — кликов по списку портов больше нет
 
     if (step == 3) {
       // 1) тоггл маркеров калибровки

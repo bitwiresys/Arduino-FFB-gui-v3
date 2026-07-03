@@ -159,7 +159,7 @@ class EncoderTab {
     // степпер / сброс Z
     float sy = by + 30;
     if (mouseY >= sy && mouseY <= sy + 22) {
-      if (mouseX >= cprX + 12 && mouseX <= cprX + 58) { cpr = max(1, cpr - 100); proto.setCPR(cpr); return; }
+      if (mouseX >= cprX + 12 && mouseX <= cprX + 58) { cpr = max(4, cpr - 100); proto.setCPR(cpr); return; }
       if (mouseX >= cprX + 64 && mouseX <= cprX + 110) { cpr = cpr + 100; proto.setCPR(cpr); return; }
       if (mouseX >= cprX + cprW - 130 && mouseX <= cprX + cprW) { proto.resetZIndex(); Log.info("ENCODER", strings.get("Сброс Z", "Z-index reset")); return; }
     }
@@ -169,7 +169,7 @@ class EncoderTab {
     if (!cprEditing) return;
     if (k == BACKSPACE) { if (cprInput.length() > 0) cprInput = cprInput.substring(0, cprInput.length() - 1); }
     else if (k == ENTER || k == RETURN) {
-      if (cprInput.length() > 0) { cpr = constrain(int(cprInput), 1, 99999); proto.setCPR(cpr); Log.info("ENCODER", "CPR = " + cpr); }
+      if (cprInput.length() > 0) { cpr = constrain(int(cprInput), 4, 99999); proto.setCPR(cpr); Log.info("ENCODER", "CPR = " + cpr); } // мин. 4 — как constrain в прошивке
       cprEditing = false;
     } else if (k == ESCAPE) { cprEditing = false; }
     else if (k >= '0' && k <= '9' && cprInput.length() < 5) { cprInput += k; }

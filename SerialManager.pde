@@ -16,6 +16,10 @@ class SerialManager {
   int timeoutMs = 2000;
   int maxRetries = 2;
   int retryCount = 0;
+  // подряд идущие таймауты: после connectionLostThreshold считаем связь потерянной
+  // (плата выдернута/зависла) и отключаемся — авто-реконнект в главном цикле подхватит
+  int consecutiveTimeouts = 0;
+  int connectionLostThreshold = 5;
 
   // Command queue for non-blocking writes
   ArrayList<String> commandQueue = new ArrayList<String>();
@@ -35,6 +39,8 @@ class SerialManager {
 
   boolean connect(String portName, int baud) {
     try {
+      if (port != null) disconnect(); // не оставляем старый порт открытым при повторном подключении
+      resetLinkState();
       port = new Serial(app, portName, baud);
       port.bufferUntil(10); // LF terminator
       this.portName = portName;
@@ -48,9 +54,23 @@ class SerialManager {
 
   void disconnect() {
     if (port != null) {
-      port.stop();
+      try { port.stop(); } catch (Throwable t) {}
       port = null;
       Log.info("SERIAL", strings.get("Отключено", "Disconnected"));
+    }
+    resetLinkState();
+  }
+
+  // Полный сброс состояния очереди/ожиданий. Раньше disconnect() оставлял
+  // commandInProgress/waitingForResponse/очередь как есть — после переподключения
+  // очередь могла навсегда «зависнуть» (commandInProgress=true без живого запроса).
+  void resetLinkState() {
+    synchronized(this) {
+      commandQueue.clear();
+      commandInProgress = false;
+      waitingForResponse = false;
+      retryCount = 0;
+      consecutiveTimeouts = 0;
     }
   }
 
@@ -73,7 +93,14 @@ class SerialManager {
     // silently corrupt the port state, making the touch-reset fail. FirmwareUpdater
     // itself never calls sendImmediate() during that window, so this can't block it.
     if (firmwareUpdater != null && firmwareUpdater.flashing) return;
-    port.write(cmd + (char)13);
+    try {
+      port.write(cmd + (char)13);
+    } catch (Throwable t) {
+      // порт умер на записи (плату выдернули) — закрываемся, авто-реконнект подхватит
+      Log.error("SERIAL", strings.get("Ошибка записи в порт: ", "Port write failed: ") + t.getMessage());
+      disconnect();
+      return;
+    }
     lastWrite = cmd;
     writeTimestamp = millis();
     waitingForResponse = true;
@@ -90,6 +117,9 @@ class SerialManager {
       String cmd = commandQueue.remove(0);
       commandInProgress = true;
       sendImmediate(cmd);
+      // sendImmediate мог тихо не отправить (порт закрыт / идёт прошивка) —
+      // иначе commandInProgress остался бы true навсегда и очередь бы встала
+      if (!waitingForResponse) commandInProgress = false;
     }
   }
 
@@ -105,6 +135,8 @@ class SerialManager {
       responseTimeMs = (int)(millis() - writeTimestamp);
       waitingForResponse = false;
       commandInProgress = false;
+      retryCount = 0;           // бюджет ретраев — на команду, а не на всю сессию
+      consecutiveTimeouts = 0;  // связь жива
       totalReads++;
       lastActivityTime = millis();
 
@@ -125,6 +157,13 @@ class SerialManager {
 
         String msg = "Timeout waiting for response to: " + lastWrite;
         Log.warn("SERIAL", msg);
+
+        consecutiveTimeouts++;
+        if (consecutiveTimeouts >= connectionLostThreshold) {
+          Log.warn("SERIAL", strings.get("Плата не отвечает — считаю связь потерянной", "Board not responding — treating the link as lost"));
+          disconnect();
+          return;
+        }
 
         if (retryCount < maxRetries) {
           retryCount++;

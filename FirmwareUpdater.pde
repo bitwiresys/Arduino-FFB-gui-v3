@@ -19,11 +19,35 @@ interface AvrdudeProgress {
   void onLine(String line);
 }
 
+// Описание одного релиза прошивки на GitHub (для ручного выбора версии в настройках)
+class FwRelease {
+  String tag = "";
+  int buildId = -1;
+  String zipUrl = "";
+}
+
 class FirmwareUpdater {
   static final String REPO = "bitwiresys/Arduino-FFB-wheel-v3";
+  // Конфигурация по умолчанию для платы без прошивки: Leonardo + AS5600 ('d','w')
+  // + пер-осевые инверсия/отключение ('v') — стандартная сборка этого проекта.
+  static final String DEFAULT_LETTERS = "dwv";
   Http http = new Http();
   UpdatePanel panel = new UpdatePanel();
   PApplet papplet;
+
+  // Режим мастера настройки: вместо тоста «доступно обновление» прошивать сразу
+  boolean autoFlash = false;
+  // Итог последней прошивки (мастер поллит эти флаги, чтобы двигаться дальше)
+  volatile boolean lastFlashFinished = false;
+  volatile boolean lastFlashOk = false;
+  volatile boolean upToDate = false;    // плата уже на последней сборке
+  volatile boolean checkFailed = false; // проверку обновлений выполнить не удалось (нет сети и т.п.)
+
+  // Список релизов для ручного выбора версии (вкладка «Настройки»)
+  ArrayList<FwRelease> releases = new ArrayList<FwRelease>();
+  volatile boolean releasesLoading = false;
+  volatile String releasesError = null;
+  boolean releasesFetchedOnce = false;
 
   boolean checked = false;    // have we already decided (shown/skipped the toast) this connection
   boolean busy = false;
@@ -67,7 +91,7 @@ class FirmwareUpdater {
 
     if (!localIdRequested) {
       localIdRequested = true;
-      serial.sendImmediate("X");
+      serial.enqueueCommand("X"); // через очередь: sendImmediate при живом 'U' сдвигал все ответы на один
     }
 
     busy = true;
@@ -87,26 +111,70 @@ class FirmwareUpdater {
     tryDecide();
   }
 
+  // Сходить на GitHub за последним релизом (блокирующе — звать только из фоновых потоков)
+  void fetchLatestCore() throws IOException {
+    String json = http.getString("https://api.github.com/repos/" + REPO + "/releases/latest");
+    JSONObject obj = parseJSONObject(json);
+    latestTag = obj.getString("tag_name");
+    latestBuildId = buildNumber(latestTag);
+    JSONArray assets = obj.getJSONArray("assets");
+    buildZipUrl = "";
+    for (int i = 0; i < assets.size(); i++) {
+      JSONObject a = assets.getJSONObject(i);
+      if (a.getString("name").equals("build.zip")) { buildZipUrl = a.getString("browser_download_url"); break; }
+    }
+    Log.info("UPDATE", strings.get("Прошивка: последний релиз ", "Firmware: latest release ") + latestTag);
+  }
+
   void doCheckNetwork() {
     try {
-      String json = http.getString("https://api.github.com/repos/" + REPO + "/releases/latest");
-      JSONObject obj = parseJSONObject(json);
-      latestTag = obj.getString("tag_name");
-      latestBuildId = buildNumber(latestTag);
-      JSONArray assets = obj.getJSONArray("assets");
-      buildZipUrl = "";
-      for (int i = 0; i < assets.size(); i++) {
-        JSONObject a = assets.getJSONObject(i);
-        if (a.getString("name").equals("build.zip")) { buildZipUrl = a.getString("browser_download_url"); break; }
-      }
-      Log.info("UPDATE", strings.get("Прошивка: последний релиз ", "Firmware: latest release ") + latestTag);
+      fetchLatestCore();
     } catch (Throwable t) {
+      checkFailed = true;
       Log.warn("UPDATE", strings.get("Проверка обновлений прошивки не удалась: ", "Firmware update check failed: ") + errText(t));
     } finally {
       networkReady = true;
       busy = false;
       tryDecide();
     }
+  }
+
+  // Список последних релизов для ручного выбора версии (вкладка «Настройки»)
+  void fetchReleases() {
+    if (releasesLoading) return;
+    releasesLoading = true;
+    releasesError = null;
+    releasesFetchedOnce = true;
+    Thread t = new Thread(new Runnable() {
+      public void run() {
+        try {
+          String json = http.getString("https://api.github.com/repos/" + REPO + "/releases?per_page=8");
+          JSONArray arr = parseJSONArray(json);
+          ArrayList<FwRelease> out = new ArrayList<FwRelease>();
+          for (int i = 0; i < arr.size(); i++) {
+            JSONObject obj = arr.getJSONObject(i);
+            FwRelease r = new FwRelease();
+            r.tag = obj.getString("tag_name");
+            r.buildId = buildNumber(r.tag);
+            JSONArray assets = obj.getJSONArray("assets");
+            for (int j = 0; j < assets.size(); j++) {
+              JSONObject a = assets.getJSONObject(j);
+              if (a.getString("name").equals("build.zip")) { r.zipUrl = a.getString("browser_download_url"); break; }
+            }
+            if (r.zipUrl.length() > 0 && r.buildId >= 0) out.add(r);
+          }
+          releases = out;
+          Log.info("UPDATE", strings.get("Релизов прошивки получено: ", "Firmware releases fetched: ") + out.size());
+        } catch (Throwable tt) {
+          releasesError = errText(tt);
+          Log.warn("UPDATE", strings.get("Список релизов не получен: ", "Failed to fetch releases: ") + errText(tt));
+        } finally {
+          releasesLoading = false;
+        }
+      }
+    });
+    t.setDaemon(true);
+    t.start();
   }
 
   // "fw-build-12" -> 12
@@ -127,10 +195,12 @@ class FirmwareUpdater {
     checked = true;
 
     if (buildZipUrl.length() == 0 || latestBuildId < 0) {
+      checkFailed = true;
       Log.warn("UPDATE", "Firmware release has no build.zip asset or unparsable tag");
       return;
     }
     if (localBuildId == latestBuildId) {
+      upToDate = true;
       Log.info("UPDATE", strings.get("Прошивка: уже последняя сборка", "Firmware: already on the latest build"));
       return;
     }
@@ -145,41 +215,133 @@ class FirmwareUpdater {
     worker.start();
   }
 
+  // Буквы-опции текущей платы (нормализованные); если платы/прошивки нет — конфиг по умолчанию
+  String currentLetters() {
+    String l = (fw != null && fw.optionLetters != null) ? normalizeLetters(fw.optionLetters) : "";
+    return l.length() > 0 ? l : normalizeLetters(DEFAULT_LETTERS);
+  }
+
+  // Найти в manifest.json релиза hex-файл под данный набор букв (Leonardo only).
+  // Заполняет matchedFile/matchedBoard/matchedLetters; false — варианта нет.
+  boolean matchVariant(JSONObject manifest, String myLetters) {
+    matchedFile = ""; matchedBoard = ""; matchedLetters = "";
+    JSONArray variants = manifest.getJSONArray("variants");
+    for (int i = 0; i < variants.size(); i++) {
+      JSONObject v = variants.getJSONObject(i);
+      if (!v.getString("board").equals("leonardo")) continue;
+      if (!normalizeLetters(v.getString("letters")).equals(myLetters)) continue;
+      matchedBoard = "leonardo";
+      matchedLetters = v.getString("letters");
+      matchedFile = "leonardo/" + v.getString("file");
+      return true;
+    }
+    return false;
+  }
+
   void doMatchAndOffer() {
     try {
       File tmpZip = new File(System.getProperty("java.io.tmpdir"), "wheel_fw_release.zip");
       http.downloadFile(buildZipUrl, tmpZip, null);
 
       JSONObject manifest = readJsonEntry(tmpZip, "manifest.json");
-      if (manifest == null) { Log.warn("UPDATE", "manifest.json not found in release zip"); return; }
+      if (manifest == null) { Log.warn("UPDATE", "manifest.json not found in release zip"); flagFlashFail(); return; }
 
-      boolean isPromicro = fw.proMicroPins;
       String myLetters = normalizeLetters(fw.optionLetters);
-      String myBoard = isPromicro ? "promicro" : "leonardo";
-
-      matchedFile = ""; matchedBoard = ""; matchedLetters = "";
-      JSONArray variants = manifest.getJSONArray("variants");
-      for (int i = 0; i < variants.size(); i++) {
-        JSONObject v = variants.getJSONObject(i);
-        if (!v.getString("board").equals(myBoard)) continue;
-        if (!normalizeLetters(v.getString("letters")).equals(myLetters)) continue;
-        matchedBoard = myBoard;
-        matchedLetters = v.getString("letters");
-        matchedFile = myBoard + "/" + v.getString("file");
-        break;
+      if (!matchVariant(manifest, myLetters)) {
+        Log.warn("UPDATE", strings.get("В новом релизе нет сборки для вашей конфигурации: ", "New release has no build for your configuration: ") + myLetters);
+        flagFlashFail();
+        return;
       }
 
-      if (matchedFile.length() > 0) {
-        cachedZipFile = tmpZip;
+      cachedZipFile = tmpZip;
+      if (autoFlash) {
+        // режим мастера: прошиваем сразу, без вопросов
+        startUpdate();
+      } else {
         panel.showAvailable(strings.get("Обновление прошивки руля", "Wheel firmware update"),
           strings.get("сборка ", "build ") + localBuildId, strings.get("сборка ", "build ") + latestBuildId,
-          strings.get("Плата: ", "Board: ") + myBoard + ", " + strings.get("опции: ", "options: ") + (matchedLetters.length() > 0 ? matchedLetters : "-"));
-      } else {
-        Log.warn("UPDATE", strings.get("В новом релизе нет сборки для вашей конфигурации: ", "New release has no build for your configuration: ") + myBoard + " " + myLetters);
+          strings.get("Плата: leonardo, ", "Board: leonardo, ") + strings.get("опции: ", "options: ") + (matchedLetters.length() > 0 ? matchedLetters : "-"));
       }
     } catch (Throwable t) {
       Log.warn("UPDATE", strings.get("Проверка обновлений прошивки не удалась: ", "Firmware update check failed: ") + errText(t));
+      flagFlashFail();
     }
+  }
+
+  // отметить неудачу для поллинга мастером (в обычном режиме просто пишем в журнал)
+  void flagFlashFail() {
+    if (autoFlash) { lastFlashFinished = true; lastFlashOk = false; }
+  }
+
+  // Ручная прошивка выбранного релиза (вкладка «Настройки»). Вариант подбирается
+  // по буквам-опциям текущей платы (или по DEFAULT_LETTERS, если прошивки нет).
+  void startManualFlash(final FwRelease rel) {
+    if (flashing) return;
+    panel.showWorking(strings.get("Прошивка ", "Flashing ") + rel.tag);
+    Thread t = new Thread(new Runnable() {
+      public void run() {
+        try {
+          panel.setProgress(0.02f, strings.get("Загрузка ", "Downloading ") + rel.tag + "...");
+          File tmpZip = new File(System.getProperty("java.io.tmpdir"), "wheel_fw_manual.zip");
+          http.downloadFile(rel.zipUrl, tmpZip, null);
+          JSONObject manifest = readJsonEntry(tmpZip, "manifest.json");
+          if (manifest == null) { panel.showError("manifest.json not found in " + rel.tag); return; }
+          String myLetters = currentLetters();
+          if (!matchVariant(manifest, myLetters)) {
+            panel.showError(strings.get("В релизе " + rel.tag + " нет сборки для конфигурации: ", "Release " + rel.tag + " has no build for configuration: ") + myLetters);
+            return;
+          }
+          cachedZipFile = tmpZip;
+          latestTag = rel.tag;
+          doFlash(serial.isConnected() ? serial.portName : lastKnownPort());
+        } catch (Throwable tt) {
+          Log.error("UPDATE", "Manual flash: " + errText(tt));
+          panel.showError(strings.get("Не удалось прошить: ", "Failed to flash: ") + errText(tt));
+        }
+      }
+    });
+    t.setDaemon(true);
+    t.start();
+  }
+
+  // Установка последнего релиза на плату БЕЗ нашей прошивки (мастер настройки):
+  // соединения нет, конфигурацию не спросить — шьём вариант rawLetters на порт напрямую.
+  void installFresh(final String port, final String rawLetters) {
+    if (flashing) return;
+    panel.showWorking(strings.get("Установка прошивки", "Installing firmware"));
+    Thread t = new Thread(new Runnable() {
+      public void run() {
+        try {
+          panel.setProgress(0.02f, strings.get("Поиск последнего релиза...", "Looking up the latest release..."));
+          if (buildZipUrl == null || buildZipUrl.length() == 0) fetchLatestCore();
+          if (buildZipUrl.length() == 0) throw new IOException(strings.get("в релизе нет build.zip", "release has no build.zip"));
+          File tmpZip = new File(System.getProperty("java.io.tmpdir"), "wheel_fw_release.zip");
+          http.downloadFile(buildZipUrl, tmpZip, null);
+          JSONObject manifest = readJsonEntry(tmpZip, "manifest.json");
+          if (manifest == null) throw new IOException("manifest.json not found in release zip");
+          if (!matchVariant(manifest, normalizeLetters(rawLetters)))
+            throw new IOException(strings.get("нет сборки для конфигурации ", "no build for configuration ") + rawLetters);
+          cachedZipFile = tmpZip;
+          doFlash(port);
+        } catch (Throwable tt) {
+          Log.error("UPDATE", "Fresh install: " + errText(tt));
+          panel.showError(strings.get("Не удалось установить прошивку: ", "Failed to install firmware: ") + errText(tt));
+          lastFlashFinished = true;
+          lastFlashOk = false;
+        }
+      }
+    });
+    t.setDaemon(true);
+    t.start();
+  }
+
+  // последний известный порт из конфига (для ручной прошивки при потерянном соединении)
+  String lastKnownPort() {
+    try {
+      String[] cfg = loadStrings("COM_cfg.txt");
+      if (cfg != null && cfg.length > 0) return trim(cfg[0]);
+    } catch (Throwable t) {}
+    return "";
   }
 
   JSONObject readJsonEntry(File zipFile, String entryName) throws IOException {
@@ -207,14 +369,15 @@ class FirmwareUpdater {
   void startUpdate() {
     panel.showWorking(strings.get("Обновление прошивки", "Updating firmware"));
     Thread t = new Thread(new Runnable() {
-      public void run() { doFlash(); }
+      public void run() { doFlash(serial.isConnected() ? serial.portName : lastKnownPort()); }
     });
     t.setDaemon(true);
     t.start();
   }
 
-  void doFlash() {
-    String originalPort = serial.portName;
+  void doFlash(String originalPort) {
+    lastFlashFinished = false;
+    lastFlashOk = false;
     flashing = true;
     try {
       panel.setProgress(0.05f, strings.get("Извлечение файла прошивки...", "Extracting firmware file..."));
@@ -223,7 +386,7 @@ class FirmwareUpdater {
       if (originalPort == null || originalPort.length() == 0) throw new IOException(strings.get("Порт не определён", "Serial port unknown"));
 
       panel.setProgress(0.15f, strings.get("Отключение...", "Disconnecting..."));
-      serial.disconnect();
+      if (serial.isConnected()) serial.disconnect(); // для «чистой» платы соединения и не было
       Thread.sleep(1000);
 
       // Hand-rolled 1200-baud touch-reset (jssc, direct port polling) was tried extensively
@@ -235,7 +398,7 @@ class FirmwareUpdater {
       // dozens of manual tests this session - so it's what actually does the flashing here,
       // bundled with just enough offline board+avrdude+discovery-tool data to run with zero
       // network access and no separate Arduino IDE/CLI install on the user's machine.
-      String fqbn = matchedBoard.equals("promicro") ? "arduino:avr:micro" : "arduino:avr:leonardo";
+      String fqbn = "arduino:avr:leonardo"; // dustin's rig - Leonardo only
       panel.setProgress(0.3f, strings.get("Заливка через arduino-cli...", "Flashing via arduino-cli..."));
       boolean ok = runArduinoCliUpload(originalPort, fqbn, hexFile, new AvrdudeProgress() {
         public void onLine(String line) {
@@ -247,16 +410,24 @@ class FirmwareUpdater {
 
       panel.setProgress(0.95f, strings.get("Переподключение...", "Reconnecting..."));
       Thread.sleep(2000); // board reboots back into the application after a successful flash
+      // плата теперь на новой сборке — сбрасываем состояние проверки ДО переподключения,
+      // чтобы свежий ответ 'V'/'X' заново сверил build id (иначе localBuildId остался бы старым)
+      checked = false;
+      localIdRequested = false;
+      localBuildId = -1;
       reconnectAfterFlash(originalPort);
 
-      panel.showDone(strings.get("Прошивка обновлена: ", "Firmware updated to ") + latestTag);
+      if (autoFlash) panel.hide(); // в мастере свой экран статуса — модалку «Готово» не показываем
+      else panel.showDone(strings.get("Прошивка обновлена: ", "Firmware updated to ") + latestTag);
       Log.info("UPDATE", strings.get("Прошивка обновлена: ", "Firmware updated to ") + latestTag);
+      lastFlashOk = true;
     } catch (Throwable t) {
       Log.error("UPDATE", "Firmware flash: " + errText(t));
       panel.showError(strings.get("Не удалось обновить прошивку: ", "Failed to update firmware: ") + errText(t));
-      try { if (!serial.isConnected() && originalPort != null) serial.connect(originalPort, 115200); } catch (Throwable t2) {}
+      try { if (!serial.isConnected() && originalPort != null && originalPort.length() > 0) serial.connect(originalPort, 115200); } catch (Throwable t2) {}
     } finally {
       flashing = false;
+      lastFlashFinished = true;
     }
   }
 
@@ -348,8 +519,7 @@ class FirmwareUpdater {
       }
       if (originalPort != null && portListContains(jssc.SerialPortList.getPortNames(), originalPort)) {
         if (serial.connect(originalPort, 115200)) {
-          readFWVersion();
-          serial.enqueueCommand("U");
+          requestDeviceState();
           return;
         }
       }
@@ -358,10 +528,11 @@ class FirmwareUpdater {
     Log.warn("UPDATE", strings.get("Плата не найдена на прежнем порту, ищу новый...", "Board not found on its old port, scanning for a new one..."));
     String[] candidates = jssc.SerialPortList.getPortNames();
     for (String p : candidates) {
+      // сначала протокольная проверка "это наша плата?", чтобы не подключаться к чужим устройствам
+      if (!probePortForWheel(p)) continue;
       if (serial.connect(p, 115200)) {
-        saveStrings("data/COM_cfg.txt", new String[]{p});
-        readFWVersion();
-        serial.enqueueCommand("U");
+        saveStrings(dataPath("COM_cfg.txt"), new String[]{p});
+        requestDeviceState();
         return;
       }
     }

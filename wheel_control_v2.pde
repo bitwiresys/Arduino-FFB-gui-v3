@@ -103,53 +103,12 @@ int maxTorque = 2047;
 // dustin's rig, added — per-axis invert/disable bitmasks (bit0=X,1=Y,2=Z,3=RX,4=RY), matches firmware 'I'/'D' commands
 byte axisInvertMask = 0;
 byte axisDisableMask = 0;
-// dustin's rig, added — motor NTC thermistor: live raw reading, current critical threshold, tripped (FFB cut) state
-int ntcRaw = -1;
-int ntcThreshold = 1023;
-boolean ntcTripped = false;
 
-// dustin's rig, added — live motor current in mA, from the 'J' command (BTS7960 IS pin). -1 = no reading yet.
-int motorCurrentMA = -1;
-int lastCurrentPoll = 0;
-
-// dustin's rig, added — hard current limit (raw ADC, 'K' command / trailing field on 'U').
-// Replaces the Global Gain % slider entirely on boards with the 'q' feature: same fixed
-// calibration constants as the current readout (must match Config.h's MOTOR_CURRENT_* on
-// the firmware side exactly, since the firmware only stores/compares the raw ADC value).
-int currentLimitRaw = 1023; // 1023 = sentinel/no limit
-float CURRENT_MIRROR_RATIO = 8500.0;
-float CURRENT_SENSE_OHMS = 1000.0;
-// Direct inverse pair of the firmware's ReadMotorCurrentMA(): mA = raw * 5000 * ratio / (1023 * ohms)
-float currentRawToAmps(float raw) { return raw * 5.0 * CURRENT_MIRROR_RATIO / (1023.0 * CURRENT_SENSE_OHMS); }
-float currentAmpsToRaw(float amps) { return amps * 1023.0 * CURRENT_SENSE_OHMS / (5.0 * CURRENT_MIRROR_RATIO); }
-float CURRENT_LIMIT_MAX_A = 40; // slider range ceiling — a bit under the ~42.5A raw=1023 ceiling
-
-// dustin's rig, added — fixed-formula NTC raw<->Celsius conversion. No calibration UI: known hardware
-// (100k NTC, B3950 — the standard 3D-printer-style thermistor used here) with a 330-ohm fixed resistor
-// in the divider (NTC between 5V and the sense pin, resistor from sense pin to GND — see firmware).
-float NTC_R_FIXED = 330;     // ohms — actual fixed resistor installed
-float NTC_R0 = 100000;       // ohms at 25C
-float NTC_T0K = 298.15;      // 25C in Kelvin
-float NTC_BETA = 3950;       // standard B-value for this thermistor family
-
-float NTC_THRESH_MIN_C = 80, NTC_THRESH_MAX_C = 200, NTC_THRESH_DEFAULT_C = 120; // dustin's rig, added — slider range/default
-boolean ntcGotFirstReading = false, ntcDefaultApplied = false;
-
-float ntcRawToOhms(float raw) {
-  raw = constrain(raw, 1, 1022); // избегаем деления на 0 (raw=0) и вырождения (raw=1023)
-  return NTC_R_FIXED * (1023.0 - raw) / raw;
-}
-float rawToTempC(float raw) {
-  float r = ntcRawToOhms(raw);
-  float invT = 1.0 / NTC_T0K + (1.0 / NTC_BETA) * log(r / NTC_R0);
-  return (1.0 / invT) - 273.15;
-}
-float tempCToRaw(float tempC) {
-  float tK = tempC + 273.15;
-  float r = NTC_R0 * exp(NTC_BETA * (1.0 / tK - 1.0 / NTC_T0K));
-  return 1023.0 * NTC_R_FIXED / (r + NTC_R_FIXED);
-}
-float ntcThreshC() { return ntcThreshold >= 1023 ? NTC_THRESH_DEFAULT_C : constrain(rawToTempC(ntcThreshold), NTC_THRESH_MIN_C, NTC_THRESH_MAX_C); }
+// dustin's rig, added — сторожевой детектор срыва привода (прошивка ≥ v254, команда 'T'):
+// прошивка сама отсекла FFB, потому что мотор долго крутился под нагрузкой при
+// неподвижном энкодере (сорвана шестерня/муфта). Снимается только перезапуском платы.
+boolean ffbFaultLatched = false;
+int lastFaultPoll = 0;
 
 ControlIO control;
 ControlDevice gpad;
@@ -293,27 +252,113 @@ void initSerial() {
   if (f.exists()) {
     String[] port = loadStrings("COM_cfg.txt");
     if (port != null && port.length > 0) {
-      if (serial.connect(port[0], 115200)) {
-        readFWVersion();
-        serial.enqueueCommand("U");
+      if (serial.connect(trim(port[0]), 115200)) {
+        requestDeviceState();
+      }
+      // если подключиться не удалось (порт сменился/платы нет) —
+      // авто-реконнект в draw() сам найдёт плату по всем портам
+    }
+  }
+  // конфига нет — этим занимается мастер первого запуска
+}
+
+// ============================================================
+// Умный реконнект и поиск платы.
+// - Пока нет связи, раз в 3 секунды: пробуем прежний порт, если он есть в системе;
+//   иначе опрашиваем все COM-порты протокольным рукопожатием 'V' (ищем "fw-v").
+// - Порт может менять номер (COM5→COM7 и т.п.) — найденный сохраняем в COM_cfg.txt.
+// - Ничего не блокирует UI: вся работа в фоновом потоке.
+// ============================================================
+int lastReconnectAt = 0;
+boolean reconnectBusy = false;
+
+void updateAutoReconnect() {
+  if (serial.isConnected() || wizard.active || firmwareUpdater.flashing || reconnectBusy) return;
+  File f = new File(dataPath("COM_cfg.txt"));
+  if (!f.exists()) return; // первичной настройкой занимается мастер
+  if (millis() - lastReconnectAt < 3000) return;
+  lastReconnectAt = millis();
+  reconnectBusy = true;
+  Thread t = new Thread(new Runnable() {
+    public void run() {
+      try {
+        String saved = null;
+        String[] cfg = loadStrings("COM_cfg.txt");
+        if (cfg != null && cfg.length > 0) saved = trim(cfg[0]);
+        String[] ports = jssc.SerialPortList.getPortNames();
+        // 1) прежний порт снова появился — подключаемся сразу
+        if (saved != null && saved.length() > 0) {
+          for (String p : ports) {
+            if (p.equals(saved)) {
+              if (serial.connect(saved, 115200)) { requestDeviceState(); }
+              return;
+            }
+          }
+        }
+        // 2) прежнего порта нет — ищем плату по всем портам рукопожатием
+        for (String p : ports) {
+          if (probePortForWheel(p)) {
+            if (serial.connect(p, 115200)) {
+              saveStrings(dataPath("COM_cfg.txt"), new String[]{p});
+              Log.info("SERIAL", strings.get("Плата найдена на новом порту: ", "Board found on a new port: ") + p);
+              requestDeviceState();
+            }
+            return;
+          }
+        }
+      } catch (Throwable tt) {
+        Log.debug("SERIAL", "reconnect: " + errText(tt));
+      } finally {
+        reconnectBusy = false;
       }
     }
-  } else {
-    String[] ports = Serial.list();
-    if (ports.length > 0) {
-      if (serial.connect(ports[0], 115200)) {
-        saveStrings("data/COM_cfg.txt", new String[]{ports[0]});
-        readFWVersion();
-        serial.enqueueCommand("U");
+  });
+  t.setDaemon(true);
+  t.start();
+}
+
+// Проверить, отвечает ли на порту наша прошивка: открыть, послать 'V',
+// подождать "fw-v". Открытие CDC-порта на 115200 НЕ перезагружает 32u4
+// (в бутлоадер уводит только 1200 бод), так что это безопасно.
+boolean probePortForWheel(String portName) {
+  return probeFwVersionLine(portName) != null;
+}
+
+// То же, но возвращает полную строку "fw-vNNN<буквы>" (null — не наша плата/нет ответа).
+// Мастеру настройки она нужна целиком: по буквам-опциям он подбирает вариант прошивки.
+String probeFwVersionLine(String portName) {
+  if (serial.isConnected() && portName.equals(serial.portName)) return null;
+  jssc.SerialPort sp = new jssc.SerialPort(portName);
+  try {
+    sp.openPort();
+    sp.setParams(115200, 8, 1, 0);
+    try { Thread.sleep(120); } catch (InterruptedException ie) {}
+    sp.writeBytes("V\r".getBytes());
+    long deadline = System.currentTimeMillis() + 900;
+    StringBuilder sb = new StringBuilder();
+    while (System.currentTimeMillis() < deadline) {
+      byte[] b = sp.readBytes();
+      if (b != null && b.length > 0) sb.append(new String(b));
+      int at = sb.indexOf("fw-v");
+      if (at >= 0) {
+        int eol = sb.indexOf("\n", at);
+        if (eol >= 0) return sb.substring(at, eol).trim();
       }
-    } else {
-      Log.warn("SERIAL", strings.get("COM-порты не найдены", "No COM ports found"));
+      try { Thread.sleep(30); } catch (InterruptedException ie) {}
     }
+    int at = sb.indexOf("fw-v");
+    return at >= 0 ? sb.substring(at).trim() : null;
+  } catch (Throwable t) {
+    return null; // занят/чужой/умер — значит не наша плата
+  } finally {
+    try { sp.closePort(); } catch (Throwable t) {}
   }
 }
 
 void readFWVersion() {
-  serial.sendImmediate("V");
+  // через очередь, а не sendImmediate: внеочередная запись при живом запросе
+  // сдвигала соответствие «команда → ответ» на один (см. parseResponse)
+  serial.enqueueCommand("V");
 }
 
 public void draw() {
@@ -322,15 +367,13 @@ public void draw() {
   hoverTip = null;
   serial.update();
   proto.update();
-  // dustin's rig, added — live motor current poll. Both 'J' and the firmware-update 'X'
-  // command reply with a single bare integer with no distinguishing marker, so this only
-  // starts once that request/response cycle is done (localBuildId gets set) to avoid the
-  // two colliding on the wire.
-  if (serial.isConnected() && !firmwareUpdater.flashing && firmwareUpdater.localBuildId >= 0
-      && fw != null && fw.fullVersionString != null && fw.fullVersionString.contains("q")
-      && millis() - lastCurrentPoll > 500) {
-    lastCurrentPoll = millis();
-    serial.enqueueCommand("J");
+  updateAutoReconnect();
+  // dustin's rig, added — опрос сторожевого детектора срыва привода (команда 'T').
+  // Только для прошивок ≥ v254 — старые не знают команду и молчали бы до таймаута.
+  if (serial.isConnected() && !firmwareUpdater.flashing && fw != null && fw.versionNumber >= 254
+      && millis() - lastFaultPoll > 1000) {
+    lastFaultPoll = millis();
+    serial.enqueueCommand("T");
   }
   readHIDInputs();
   for (int i = 0; i < 5; i++) {
@@ -441,79 +484,119 @@ public void serialEvent(Serial p) {
   if (data == null) return;
   data = data.trim();
   if (data.length() == 0) return;
+  // ВАЖНО: запоминаем, какой команде отвечает эта строка, ДО onSerialData() —
+  // onSerialData() сразу отправляет следующую команду из очереди и перезаписывает
+  // serial.lastWrite, из-за чего ответ приписывался бы не той команде.
+  String cmd = serial.lastWrite;
   serial.onSerialData(data);
-  parseResponse(data);
+  parseResponse(data, cmd);
 }
 
-void parseResponse(String data) {
+// есть ли у подключённой прошивки данная буква-опция (из ответа 'V')
+boolean fwHas(String letter) {
+  return fw != null && fw.optionLetters != null && fw.optionLetters.contains(letter);
+}
+
+// Маршрутизация ответов по команде-источнику (протокол строго запрос→ответ).
+// Раньше ответы различались по содержимому, и любые «голые» числа (эхо "1" от FG/FC/...,
+// бинарные эхо E/I/D вида "10110") принимались за build id ('X') или ток мотора ('J') —
+// из-за этого появлялись ложные предложения обновить прошивку и мусор в показаниях тока.
+void parseResponse(String data, String cmd) {
   if (data.startsWith("fw-v")) {
     fw.parse(data);
+    // дочитываем состояние платы командами, которые её прошивка ТОЧНО знает:
+    // YR только при ручной калибровке (без 'a'), HG только при XY-шифтере ('f') —
+    // на прошивке без опции эти двухбуквенные команды раньше оставляли «хвост»
+    // в буфере, и он исполнялся как посторонняя команда (исправлено и в прошивке)
+    if (!fw.pedalAutoCalib) serial.enqueueCommand("YR");
+    if (fw.xyShifter)       serial.enqueueCommand("HG");
     firmwareUpdater.checkForUpdate(); // dustin's rig, added — runs in a background thread, non-blocking
     return;
   }
-  // dustin's rig, added — the 'N' command reply is exactly 3 space-separated ints ("raw threshold tripped"),
-  // distinct from every other bare numeric reply in the protocol (U has 18 fields, HR/HG have 2/6).
-  String[] parts = split(data, ' ');
-  if (parts.length == 3 && data.matches("[0-9 ]+")) {
-    parseNtcResponse(data);
+  if (cmd == null) cmd = "";
+  if (cmd.equals("X") && data.matches("[0-9]+")) { firmwareUpdater.onLocalBuildId(int(data)); return; }
+  if (cmd.equals("T") && data.matches("[0-9]+")) {
+    boolean f = int(data) != 0;
+    if (f && !ffbFaultLatched) Log.error("SYSTEM", strings.get("СРЫВ ПРИВОДА: энкодер неподвижен под нагрузкой — FFB остановлен прошивкой. Перезапустите плату.", "DRIVETRAIN FAULT: encoder frozen under load — FFB stopped by the firmware. Restart the board."));
+    ffbFaultLatched = f;
     return;
   }
-  // dustin's rig, added — 'X' (FW_BUILD_ID) and 'J' (motor current mA) both reply with a single
-  // bare integer, no distinguishing marker. Routed by context: 'X' is only ever requested once,
-  // early (see FirmwareUpdater.checkForUpdate); the current poll doesn't start until that's
-  // resolved (localBuildId >= 0), so once resolved every later bare integer is 'J's.
-  if (data.matches("[0-9]+")) {
-    if (firmwareUpdater.localBuildId < 0) {
-      firmwareUpdater.onLocalBuildId(int(data));
-    } else {
-      motorCurrentMA = int(data);
-    }
-    return;
-  }
-  if (data.length() > 11) {
-    parseWheelParams(data);
-  }
+  if (cmd.equals("U"))  { parseWheelParams(data); return; }
+  if (cmd.equals("YR")) { parsePedalCal(data); return; }
+  if (cmd.equals("HG")) { parseShifterCal(data); return; }
+  if (cmd.equals("HR")) { parseShifterPos(data); return; }
+  // незапрошенные строки (например, поток FFB-монитора) — игнорируем;
+  // на всякий случай распознаём полный ответ 'U', если lastWrite не сохранился
+  if (split(data, ' ').length >= 16 && data.matches("[0-9 .\\-]+")) parseWheelParams(data);
 }
 
 void parseWheelParams(String data) {
   float[] t = float(split(data, ' '));
   if (t.length < 16) return;
   for (int i = 0; i < 10; i++) effects[i].gain = (i == 0) ? t[i] : t[i] / 100.0;
-  if (t.length > 11) effects[11].gain = t[11];
-  if (t.length > 12) { effstate = byte(int(t[12])); decodeEffstate(effstate); }
-  if (t.length > 13) maxTorque = int(t[13]);
-  // min torque (idx10): firmware sends raw * 10, so divide by 10 to recover
-  if (t.length > 10) effects[10].gain = t[10] / 10.0;
-  if (t.length > 14) encoderTab.cpr = int(t[14]);
-  if (t.length > 15) pwmstate = byte(int(t[15]));
-  // dustin's rig, added — trailing fields appended to the 'U' response by the updated firmware
-  if (t.length > 16) axisInvertMask = byte(int(t[16]));
-  if (t.length > 17) axisDisableMask = byte(int(t[17]));
-  if (t.length > 18) currentLimitRaw = int(t[18]);
+  effects[11].gain = t[11];
+  effstate = byte(int(t[12])); decodeEffstate(effstate);
+  maxTorque = int(t[13]);
+  // min torque (idx10): прошивка шлёт MM_MIN_MOTOR_TORQUE в сырых единицах момента
+  // (доля от maxTorque), а не %*10 — восстанавливаем проценты через максимум.
+  // Старое деление на 10 давало, например, 10.2% вместо реальных 5%.
+  effects[10].gain = maxTorque > 0 ? t[10] / maxTorque * 100.0 : 0;
+  encoderTab.cpr = int(t[14]);
+  pwmstate = byte(int(t[15]));
+  // dustin's rig, added — хвостовые inv/dis-маски присутствуют только на прошивках с опцией 'v'
+  if (fwHas("v") && t.length > 17) {
+    axisInvertMask = byte(int(t[16]));
+    axisDisableMask = byte(int(t[17]));
+  }
 }
 
-// dustin's rig, added — response to the 'N' command: "<raw> <threshold> <tripped 0/1>"
-void parseNtcResponse(String data) {
-  String[] t = split(data, ' ');
-  if (t.length < 3) return;
-  ntcRaw = int(t[0]);
-  ntcThreshold = int(t[1]);
-  ntcTripped = int(t[2]) != 0;
-  // dustin's rig, added — first time we hear from a wheel whose threshold is still at the firmware's
-  // "1023 = disabled" sentinel, push our own real default (120C) once, so the feature is live out of the box.
-  if (!ntcGotFirstReading) {
-    ntcGotFirstReading = true;
-    if (ntcThreshold >= 1023 && !ntcDefaultApplied) {
-      ntcDefaultApplied = true;
-      ntcThreshold = int(constrain(tempCToRaw(NTC_THRESH_DEFAULT_C), 0, 1023));
-      proto.setParam("M ", ntcThreshold);
-      Log.info("SAFETY", strings.get("Порог NTC по умолчанию: ", "Default NTC threshold: ") + int(NTC_THRESH_DEFAULT_C) + "°C");
-    }
+// Ответ 'YR' — ручная калибровка педалей: "brakeMin brakeMax accelMin accelMax
+// clutchMin clutchMax hbrakeMin hbrakeMax" (или "0" при автокалибровке).
+// Синхронизирует маркеры на «Обзоре» с реальным состоянием платы при подключении.
+void parsePedalCal(String data) {
+  String[] t = split(trim(data), ' ');
+  if (t.length < 8) return;
+  int[] axByField = {1, 2, 3, 4};  // Y=тормоз, Z=газ, RX=сцепление, RY=ручник — порядок прошивки
+  for (int i = 0; i < 4; i++) {
+    dashboardTab.calMin[axByField[i]] = float(t[i * 2]);
+    dashboardTab.calMax[axByField[i]] = float(t[i * 2 + 1]);
   }
+}
+
+// Ответ 'HG' — калибровка и конфиг шифтера: "cal0 cal1 cal2 cal3 cal4 cfg" (или "0")
+void parseShifterCal(String data) {
+  String[] t = split(trim(data), ' ');
+  if (t.length < 6) return;
+  for (int i = 0; i < 5; i++) shifterTab.cal[i] = float(t[i]);
+  int cfg = int(t[5]);
+  shifterTab.revInverted  = (cfg & 1) != 0;
+  shifterTab.reverseIn8th = (cfg & 2) != 0;
+  shifterTab.xInverted    = (cfg & 4) != 0;
+  shifterTab.yInverted    = (cfg & 8) != 0;
+}
+
+// Ответ 'HR' — живое положение рычага шифтера: "x y" (сырые АЦП с пинов шифтера).
+// До этого вкладка «Шифтер» показывала HID-оси RX/RY (сцепление/ручник) вместо шифтера.
+void parseShifterPos(String data) {
+  String[] t = split(trim(data), ' ');
+  if (t.length < 2) return;
+  shifterTab.liveX = float(t[0]);
+  shifterTab.liveY = float(t[1]);
+  shifterTab.livePolled = true;
+}
+
+// Запросить полное состояние платы после (пере)подключения.
+// YR/HG дозапрашиваются после ответа 'V' (см. parseResponse) — когда уже известно,
+// какие опции есть у прошивки и какие команды ей можно слать.
+void requestDeviceState() {
+  ffbFaultLatched = false;         // сторож: после ребута платы латч в прошивке сброшен
+  readFWVersion();                 // 'V' — версия и буквы-опции
+  serial.enqueueCommand("U");      // все настройки FFB
 }
 
 // dustin's rig, added — flip one bit of the axis invert mask and push it to the firmware (command 'I')
 void toggleAxisInvert(int axisIdx) {
+  if (!fwHas("v")) return; // прошивка без USE_AXIS_TWEAKS не знает команд I/D
   axisInvertMask = byte((int(axisInvertMask) & 0xFF) ^ (1 << axisIdx));
   proto.setParam("I ", int(axisInvertMask) & 0xFF);
   Log.info("AXIS", strings.get("Инверсия оси ", "Axis invert ") + dashboardTab.axPhys[axisIdx] + ": " + (bitReadByte(axisInvertMask, axisIdx) == 1 ? "ON" : "OFF"));
@@ -521,6 +604,7 @@ void toggleAxisInvert(int axisIdx) {
 
 // dustin's rig, added — flip one bit of the axis disable mask and push it to the firmware (command 'D')
 void toggleAxisDisable(int axisIdx) {
+  if (!fwHas("v")) return; // прошивка без USE_AXIS_TWEAKS не знает команд I/D
   axisDisableMask = byte((int(axisDisableMask) & 0xFF) ^ (1 << axisIdx));
   proto.setParam("D ", int(axisDisableMask) & 0xFF);
   Log.info("AXIS", strings.get("Отключение оси ", "Axis disable ") + dashboardTab.axPhys[axisIdx] + ": " + (bitReadByte(axisDisableMask, axisIdx) == 1 ? "ON" : "OFF"));
@@ -548,14 +632,12 @@ public void mouseReleased() {
   if (wizard.active) { wizard.handleRelease(); return; }
   if (tabBar.activeTab == TAB_DASHBOARD) dashboardTab.handleRelease();
   if (tabBar.activeTab == TAB_SHIFTER) shifterTab.handleRelease();
-  if (tabBar.activeTab == TAB_SETTINGS) settingsTab.handleRelease(); // dustin's rig, added — NTC slider
 }
 
 public void mouseDragged() {
   if (wizard.active) return;
   if (tabBar.activeTab == TAB_DASHBOARD) dashboardTab.handleDrag();
   else if (tabBar.activeTab == TAB_SHIFTER) shifterTab.handleDrag();
-  else if (tabBar.activeTab == TAB_SETTINGS) settingsTab.handleDrag(); // dustin's rig, added — NTC slider
 }
 
 public void mouseWheel(MouseEvent event) {
@@ -563,10 +645,14 @@ public void mouseWheel(MouseEvent event) {
 }
 
 public void keyPressed() {
+  // ESC во время ввода CPR/поиска в журнале/мастера должен отменять ввод,
+  // а не закрывать всё приложение (поведение Processing по умолчанию)
+  boolean escConsumed = (key == ESC) && (wizard.active || encoderTab.cprEditing || logTab.searchActive);
   switch (tabBar.activeTab) {
     case TAB_ENCODER: encoderTab.handleKey(key); break;
     case TAB_LOG: logTab.handleKey(key); break;
   }
+  if (escConsumed) key = 0;
 }
 
 int bitReadByte(byte b, int bitPos) {

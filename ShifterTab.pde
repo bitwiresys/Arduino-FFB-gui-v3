@@ -13,6 +13,10 @@ class ShifterTab {
   boolean revInverted = false, reverseIn8th = false, xInverted = false, yInverted = false;
 
   float liveX = 512, liveY = 512;
+  // живая позиция берётся из ответа 'HR' прошивки (реальные пины шифтера);
+  // пока ответа не было — фолбэк на HID-оси RX/RY (как раньше)
+  boolean livePolled = false;
+  int lastPosPoll = 0;
 
   int colBg = color(24, 24, 30), colEdge = color(55, 55, 66);
   int colText = color(195, 200, 210), colDim = color(125, 130, 140), colAcc = color(70, 150, 230);
@@ -37,12 +41,18 @@ class ShifterTab {
     if (langVer != strings.version) refreshLabels();
     pushStyle();
     textAlign(LEFT, TOP);
-    // NOTE: Shifter X/Y are hardcoded to physical axes 3 (RX) and 4 (RY).
-    // This is a known limitation — the shifter assumes these axes are not
-    // reassigned to other roles (e.g. clutch, handbrake) by the user.
-    // A future fix should resolve axes from a configurable shifterAxisX/Y setting.
-    liveX = (axes[3].rawValue + 1) / 2.0 * 1023;
-    liveY = (axes[4].rawValue + 1) / 2.0 * 1023;
+    // Живая позиция рычага: если прошивка собрана с XY-шифтером ('f'), опрашиваем
+    // команду 'HR' — она отдаёт реальные аналоговые значения с пинов шифтера.
+    // HID-оси RX/RY тут были неверным источником: на шифтерных сборках это
+    // сцепление/ручник, а сам шифтер в HID приходит уже кнопками передач.
+    if (serial.isConnected() && fwHas("f") && !firmwareUpdater.flashing && millis() - lastPosPoll > 200) {
+      lastPosPoll = millis();
+      serial.enqueueCommand("HR");
+    }
+    if (!livePolled) {
+      liveX = (axes[3].rawValue + 1) / 2.0 * 1023;
+      liveY = (axes[4].rawValue + 1) / 2.0 * 1023;
+    }
 
     fill(colText); textSize(15);
     text(strings.get("Аналоговый H-шифтер (8 передач + реверс)", "Analog H-Shifter (8 gears + reverse)"), cx + 12, cy + 10);
@@ -158,10 +168,14 @@ class ShifterTab {
     if (toggleHit(y)) { revInverted = !revInverted; sendConfig(); return; } y += 26;
     if (toggleHit(y)) { xInverted = !xInverted; sendConfig(); return; } y += 26;
     if (toggleHit(y)) { yInverted = !yInverted; sendConfig(); return; } y += 30;
-    // сброс
+    // сброс: в прошивке НЕТ команды сброса шифтера ('HR' — это чтение позиции),
+    // поэтому явно шлём дефолтные точки калибровки HA..HE и конфиг HF
     if (mouseY >= y && mouseY <= y + 26 && mouseX >= rpX + 12 && mouseX <= rpX + rpW - 12) {
       cal[0] = 255; cal[1] = 511; cal[2] = 767; cal[3] = 300; cal[4] = 720;
-      proto.sendNow("HR"); proto.requestAutosave("HG"); Log.info("SHIFTER", strings.get("Сброс калибровки", "Calibration reset")); return;
+      for (int i = 0; i < 5; i++) proto.setParam(calCmd[i], int(cal[i]));
+      revInverted = false; reverseIn8th = false; xInverted = false; yInverted = false;
+      proto.setParam("HF ", 0);
+      Log.info("SHIFTER", strings.get("Сброс калибровки", "Calibration reset")); return;
     }
   }
   boolean toggleHit(float y) { return mouseX >= rpX + 12 && mouseX <= rpX + rpW - 24 && mouseY >= y && mouseY <= y + 17; }

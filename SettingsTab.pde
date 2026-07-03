@@ -84,15 +84,71 @@ class SettingsTab {
     pwmX = cx + 12; pwmY = cy + 40; pwmW = 560; pwmH = 260;
     prX = cx + 12 + pwmW + 12; prY = cy + 40; prW = cw - pwmW - 36; prH = ch - 52;
     drawPwm();
-    float fwInfoH = 76;
-    drawFwInfo(fw, pwmX, pwmY + pwmH + 12, pwmW, fwInfoH);
-    // dustin's rig, added — NTC panel fills the rest of the left column down to the same
-    // bottom edge as the profiles panel on the right, so the two columns end flush.
-    float ntcY = pwmY + pwmH + 12 + fwInfoH + 12;
     float colBottom = prY + prH;
-    drawNtcPanel(pwmX, ntcY, pwmW, colBottom - ntcY);
+    float fwInfoY = pwmY + pwmH + 12;
+    float fwInfoH = 76;
+    drawFwInfo(fw, pwmX, fwInfoY, pwmW, fwInfoH);
+    // панель ручной прошивки занимает остаток левой колонки до нижнего края правой
+    float fvY = fwInfoY + fwInfoH + 12;
+    drawFwVersions(pwmX, fvY, pwmW, colBottom - fvY);
     drawProfiles();
     popStyle();
+  }
+
+  // ---- ручная перепрошивка: выбор версии из релизов GitHub ----
+  int selRelease = 0;
+  float fvX, fvY, fvW, fvH, fvListY, fvRowH = 24;
+  float fvBtnY;
+
+  void drawFwVersions(float x, float y, float w, float h) {
+    fvX = x; fvY = y; fvW = w; fvH = h;
+    panel(x, y, w, h, strings.get("Версии прошивки (ручная прошивка)", "Firmware Versions (manual flashing)"));
+
+    // список подгружаем лениво при первом показе панели
+    if (!firmwareUpdater.releasesFetchedOnce && serial != null) firmwareUpdater.fetchReleases();
+
+    float sy = y + 28;
+    fill(colDim); textAlign(LEFT, TOP); textSize(10);
+    if (firmwareUpdater.releasesLoading) {
+      text(strings.get("Загрузка списка релизов...", "Loading release list..."), x + 12, sy);
+    } else if (firmwareUpdater.releasesError != null) {
+      fill(color(210, 120, 80));
+      text(strings.get("Ошибка: ", "Error: ") + firmwareUpdater.releasesError, x + 12, sy);
+    } else if (firmwareUpdater.releases.isEmpty()) {
+      text(strings.get("Релизы не найдены", "No releases found"), x + 12, sy);
+    } else {
+      text(strings.get("Вариант подбирается по конфигурации платы автоматически (", "The variant is matched to the board configuration automatically (")
+           + firmwareUpdater.currentLetters() + ")", x + 12, sy);
+    }
+    sy += 18;
+    fvListY = sy;
+
+    ArrayList<FwRelease> rel = firmwareUpdater.releases;
+    if (selRelease >= rel.size()) selRelease = 0;
+    int maxRows = max(0, int((y + h - 46 - fvListY) / fvRowH));
+    for (int i = 0; i < rel.size() && i < maxRows; i++) {
+      FwRelease r = rel.get(i);
+      float ry = fvListY + i * fvRowH;
+      boolean sel = i == selRelease;
+      boolean isCurrent = firmwareUpdater.localBuildId >= 0 && r.buildId == firmwareUpdater.localBuildId;
+      fill(sel ? color(35, 55, 80) : color(20, 21, 27)); stroke(colEdge); strokeWeight(1);
+      rect(x + 12, ry, w - 24, fvRowH - 3, 4);
+      fill(sel ? colText : colDim); noStroke(); textAlign(LEFT, CENTER); textSize(11);
+      text(r.tag + (i == 0 ? strings.get("  (последняя)", "  (latest)") : ""), x + 22, ry + (fvRowH - 3) / 2);
+      if (isCurrent) {
+        fill(color(90, 190, 120)); textAlign(RIGHT, CENTER); textSize(10);
+        text(strings.get("на плате ✓", "on board ✓"), x + w - 22, ry + (fvRowH - 3) / 2);
+      }
+    }
+
+    fvBtnY = y + h - 38;
+    float bw = (w - 24 - 8) / 2.0;
+    smlBtn(x + 12, fvBtnY, bw, 28, strings.get("Обновить список", "Refresh list"), color(50, 52, 60));
+    boolean canFlash = !firmwareUpdater.releases.isEmpty() && !firmwareUpdater.flashing;
+    smlBtn(x + 12 + bw + 8, fvBtnY, bw, 28,
+      strings.get("Прошить выбранную", "Flash selected"), canFlash ? color(140, 80, 45) : color(45, 45, 52));
+    tipZone(x + 12 + bw + 8, fvBtnY, bw, 28, strings.get("Скачает выбранный релиз и прошьёт плату (вариант — по текущей конфигурации).",
+      "Downloads the selected release and flashes the board (variant matched to the current configuration)."));
   }
 
   void panel(float x, float y, float w, float h, String t) {
@@ -158,75 +214,13 @@ class SettingsTab {
     boolean conn = serial.isConnected();
     fill(conn ? color(80, 200, 110) : color(210, 80, 80)); noStroke(); ellipse(x + 16, sy + 5, 9, 9);
     fill(colText); textAlign(LEFT, CENTER); textSize(11);
-    text(conn ? strings.get("Подключено к ", "Connected to ") + (serial.port != null ? "COM" : "") + " (" + strings.get("см. журнал", "see log") + ")" : strings.get("Нет связи с Arduino", "No Arduino connection"), x + 28, sy + 5);
+    text(conn ? strings.get("Подключено к ", "Connected to ") + serial.portName : strings.get("Нет связи с Arduino", "No Arduino connection"), x + 28, sy + 5);
     sy += 22;
     fill(colDim); textAlign(LEFT, TOP); textSize(10);
     if (fw != null && fw.versionNumber > 0) {
       text(strings.get("Версия: ", "Version: ") + fw.fullVersionString, x + 12, sy); sy += 16;
       text(fw.getSummary(), x + 12, sy);
     } else text(strings.get("Прошивка не определена", "Firmware unknown"), x + 12, sy);
-  }
-
-  // dustin's rig, added — motor NTC thermistor panel: live temperature (fixed 100k/B3950/330-ohm
-  // formula, no calibration UI — known hardware) and a drag slider for the cutoff threshold, 80-200°C.
-  int lastNtcPoll = 0;
-  float ntcSliderX, ntcSliderY, ntcSliderW, ntcSliderH;
-  boolean ntcSliderDragging = false;
-
-  void drawNtcPanel(float x, float y, float w, float h) {
-    panel(x, y, w, h, strings.get("Термистор мотора (NTC)", "Motor Thermistor (NTC)"));
-    // dustin's rig, added — firmwareUpdater.flashing guard: this poll racing with the
-    // firmware-update background thread's disconnect()/1200-baud touch was silently
-    // corrupting the port and making the touch-reset fail every time.
-    if (serial.isConnected() && !firmwareUpdater.flashing && millis() - lastNtcPoll > 500) { lastNtcPoll = millis(); serial.enqueueCommand("N"); }
-
-    float sy = y + 30;
-    boolean haveReading = ntcRaw >= 0;
-    float liveC = haveReading ? rawToTempC(ntcRaw) : 0;
-    color statusCol = ntcTripped ? color(220, 70, 70) : (liveC > ntcThreshC() * 0.85 ? color(220, 180, 60) : color(80, 200, 110));
-    fill(haveReading ? statusCol : colDim); noStroke(); ellipse(x + 17, sy + 7, 11, 11);
-    fill(colText); textAlign(LEFT, CENTER); textSize(16);
-    text(haveReading ? nf(liveC, 1, 1) + "°C" : "—", x + 32, sy + 6);
-    fill(colDim); textAlign(LEFT, CENTER); textSize(9);
-    text((ntcTripped ? strings.get("ПЕРЕГРЕВ — FFB отключён", "OVERHEAT — FFB cut") : strings.get("норма", "OK")) + (haveReading ? "  (raw " + ntcRaw + ")" : ""), x + 32, sy + 21);
-    tipZone(x + 12, sy - 6, w - 24, 32, strings.get("Живая температура мотора по датчику NTC. Красный — сработала критическая защита и FFB отключён.", "Live motor temperature from the NTC sensor. Red — critical protection tripped, FFB is cut."));
-    sy += 40;
-
-    stroke(colEdge); strokeWeight(1); line(x + 12, sy, x + w - 12, sy); sy += 16;
-
-    float threshC = ntcThreshC();
-    fill(colDim); textAlign(LEFT, CENTER); textSize(10);
-    text(strings.get("Порог отключения FFB", "FFB cutoff threshold"), x + 12, sy);
-    fill(colAcc); textAlign(RIGHT, CENTER); textSize(14);
-    text(nf(threshC, 1, 0) + "°C", x + w - 12, sy);
-    sy += 24;
-
-    ntcSliderX = x + 16; ntcSliderY = sy; ntcSliderW = w - 32; ntcSliderH = 14;
-    float frac = constrain((threshC - NTC_THRESH_MIN_C) / (NTC_THRESH_MAX_C - NTC_THRESH_MIN_C), 0, 1);
-    fill(16); stroke(colEdge); rect(ntcSliderX, ntcSliderY, ntcSliderW, ntcSliderH, 7);
-    noStroke(); fill(color(215, 130, 60)); rect(ntcSliderX, ntcSliderY, ntcSliderW * frac, ntcSliderH, 7);
-    float knobX = ntcSliderX + ntcSliderW * frac;
-    fill(255); ellipse(knobX, ntcSliderY + ntcSliderH / 2.0, 20, 20);
-    fill(colDim); textAlign(LEFT, TOP); textSize(9);
-    text(int(NTC_THRESH_MIN_C) + "°C", ntcSliderX, ntcSliderY + ntcSliderH + 6);
-    textAlign(RIGHT, TOP); text(int(NTC_THRESH_MAX_C) + "°C", ntcSliderX + ntcSliderW, ntcSliderY + ntcSliderH + 6);
-    tipZone(ntcSliderX - 10, ntcSliderY - 12, ntcSliderW + 20, ntcSliderH + 34, strings.get("Тяните, чтобы задать температуру мотора, при которой FFB критически отключается.", "Drag to set the motor temperature at which FFB critically cuts off."));
-  }
-
-  void applyNtcSliderDrag() {
-    float frac = constrain((mouseX - ntcSliderX) / ntcSliderW, 0, 1);
-    float newC = NTC_THRESH_MIN_C + frac * (NTC_THRESH_MAX_C - NTC_THRESH_MIN_C);
-    int raw = int(constrain(tempCToRaw(newC), 0, 1023));
-    if (raw != ntcThreshold) {
-      ntcThreshold = raw;
-      proto.setParam("M ", ntcThreshold);
-    }
-  }
-
-  void handleDrag() { if (ntcSliderDragging) applyNtcSliderDrag(); }
-  void handleRelease() {
-    if (ntcSliderDragging) Log.info("SAFETY", strings.get("Порог NTC: ", "NTC threshold: ") + nf(ntcThreshC(), 1, 0) + "°C (raw " + ntcThreshold + ")");
-    ntcSliderDragging = false;
   }
 
   void drawProfiles() {
@@ -263,15 +257,15 @@ class SettingsTab {
   // though they already autosave to the Arduino's own EEPROM. Extended to 32 fields;
   // loadProfile() stays backward-compatible with older/shorter profile files.
   void saveProfile(int i) {
-    String[] lines = new String[32];
+    String[] lines = new String[27]; // ровно столько полей и заполняем (32 оставляло 5 строк "null" в файле)
     lines[0] = str(int(effects[0].gain));
     for (int e = 1; e < 12; e++) lines[e] = str(effects[e].gain);
     lines[12] = str(encoderTab.cpr);
     lines[13] = str(int(pwmstate) & 0xFF);
     lines[14] = str(int(axisInvertMask) & 0xFF);
     lines[15] = str(int(axisDisableMask) & 0xFF);
-    lines[16] = str(ntcThreshold);
-    lines[17] = str(currentLimitRaw);
+    lines[16] = "1023"; // зарезервировано (бывший порог NTC) — оставлено ради совместимости формата
+    lines[17] = "1023"; // зарезервировано (бывший лимит тока)
     lines[18] = str(int(effstate) & 0xFF);
     for (int a = 1; a < 5; a++) lines[18 + a] = str(int(dashboardTab.calMin[a]));
     for (int a = 1; a < 5; a++) lines[22 + a] = str(int(dashboardTab.calMax[a]));
@@ -288,10 +282,15 @@ class SettingsTab {
       pwmstate = byte(int(lines[13])); proto.setPwmState(int(pwmstate) & 0xFF);
     }
     if (lines.length > 26) {
-      axisInvertMask = byte(int(lines[14]) & 0xFF); proto.setParam("I ", int(axisInvertMask) & 0xFF);
-      axisDisableMask = byte(int(lines[15]) & 0xFF); proto.setParam("D ", int(axisDisableMask) & 0xFF);
-      ntcThreshold = int(lines[16]); proto.setParam("M ", ntcThreshold);
-      currentLimitRaw = int(lines[17]); proto.setParam("K ", currentLimitRaw);
+      // I/D шлём только если прошивка собрана с опцией 'v' —
+      // иначе неизвестная команда молчит и очередь копит таймауты
+      axisInvertMask = byte(int(lines[14]) & 0xFF);
+      axisDisableMask = byte(int(lines[15]) & 0xFF);
+      if (fwHas("v")) {
+        proto.setParam("I ", int(axisInvertMask) & 0xFF);
+        proto.setParam("D ", int(axisDisableMask) & 0xFF);
+      }
+      // lines[16]/lines[17] — зарезервированные поля (бывшие NTC/лимит тока), игнорируем
       effstate = byte(int(lines[18]) & 0xFF); decodeEffstate(effstate); applyEffstate();
       for (int a = 1; a < 5; a++) {
         dashboardTab.calMin[a] = float(lines[18 + a]);
@@ -329,8 +328,21 @@ class SettingsTab {
     y += 36;
     if (hit(pwmX + 120, y - 2, 34, 22)) { pwmFreq = max(0, pwmFreq - 1); applyPwm(); return; }
     if (hit(pwmX + 290, y - 2, 34, 22)) { pwmFreq = min(9, pwmFreq + 1); applyPwm(); return; }
-    // dustin's rig, added — захват слайдера порога NTC
-    if (hit(ntcSliderX - 10, ntcSliderY - 12, ntcSliderW + 20, ntcSliderH + 34)) { ntcSliderDragging = true; applyNtcSliderDrag(); return; }
+    // ручная прошивка: выбор релиза и кнопки
+    ArrayList<FwRelease> rel = firmwareUpdater.releases;
+    int maxRows = max(0, int((fvY + fvH - 46 - fvListY) / fvRowH));
+    for (int i = 0; i < rel.size() && i < maxRows; i++) {
+      float ry = fvListY + i * fvRowH;
+      if (hit(fvX + 12, ry, fvW - 24, fvRowH - 3)) { selRelease = i; return; }
+    }
+    float fvBw = (fvW - 24 - 8) / 2.0;
+    if (hit(fvX + 12, fvBtnY, fvBw, 28)) { firmwareUpdater.fetchReleases(); return; }
+    if (hit(fvX + 12 + fvBw + 8, fvBtnY, fvBw, 28)) {
+      if (!rel.isEmpty() && !firmwareUpdater.flashing && selRelease < rel.size()) {
+        firmwareUpdater.startManualFlash(rel.get(selRelease));
+      }
+      return;
+    }
     // профили: выбор слота
     float ly = prY + 46, lh = 28;
     for (int i = 0; i < NSLOTS; i++) {

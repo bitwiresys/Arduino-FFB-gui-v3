@@ -26,9 +26,10 @@ class WheelProtocol {
   int lastFlush = 0;
 
   // Автосохранение в постоянную память: вместо ручных кнопок «Сохранить» —
-  // после паузы autosaveDelayMs без новых изменений сами шлём команды сохранения.
-  // "A"  — общая EEPROM (FFB-гейны, калибровка осей, CPR, PWM, effstate);
-  // "HG" — отдельная команда сохранения калибровки шифтера (см. протокол).
+  // после паузы autosaveDelayMs без новых изменений сами шлём команду сохранения.
+  // "A" — общая EEPROM: FFB-гейны, калибровка осей и шифтера, CPR, effstate и т.д.
+  // (в прошивке SaveEEPROMConfig() пишет и шифтерные SHFT_*-адреса; отдельной
+  // команды сохранения шифтера НЕТ — "HG" это ЧТЕНИЕ калибровки, не запись).
   HashSet<String> pendingSaves = new HashSet<String>();
   int lastChangeAt = 0;
   int autosaveDelayMs = 1200;
@@ -58,7 +59,7 @@ class WheelProtocol {
   // РЈРЅРёРІРµСЂСЃР°Р»СЊРЅРѕ: Р·Р°РґР°С‚СЊ Р·РЅР°С‡РµРЅРёРµ РґР»СЏ РїСЂРѕРёР·РІРѕР»СЊРЅРѕРіРѕ С‚РѕРєРµРЅР° ("O ", "E ", "W ", "YA " ...)
   void setParam(String token, int value) {
     desired.put(token, value);
-    markDirty(token.startsWith("H") ? "HG" : "A");
+    markDirty("A");
   }
 
   // РќРµРјРµРґР»РµРЅРЅР°СЏ РѕРґРёРЅРѕС‡РЅР°СЏ РєРѕРјР°РЅРґР° Р±РµР· Р·РЅР°С‡РµРЅРёСЏ ("C", "A", "Z", "U", "V", "S", "R", "P")
@@ -77,7 +78,7 @@ class WheelProtocol {
       s.enqueueCommand(token + value);
       Log.info("PROTO", "TX " + token + value);
     }
-    markDirty(token.startsWith("H") ? "HG" : "A");
+    markDirty("A");
   }
 
   // Р’С‹СЃРѕРєРѕСѓСЂРѕРІРЅРµРІС‹Рµ РїРѕРјРѕС‰РЅРёРєРё Рє СЂРµР°Р»СЊРЅС‹Рј РєРѕРјР°РЅРґР°Рј РїСЂРѕС€РёРІРєРё
