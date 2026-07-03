@@ -26,14 +26,31 @@ class FwRelease {
   String zipUrl = "";
 }
 
+// Один собранный вариант прошивки из manifest.json релиза (letters + человекочитаемые
+// описания опций) — то, из чего конфигуратор мастера строит список выбора для «чистой»
+// платы, на которой ещё нет прошивки и опросить 'V' физически нечем.
+class FwVariant {
+  String letters = "";
+  String file = "";
+  ArrayList<String> features = new ArrayList<String>();
+}
+
 class FirmwareUpdater {
   static final String REPO = "bitwiresys/Arduino-FFB-wheel-v3";
-  // Конфигурация по умолчанию для платы без прошивки: Leonardo + AS5600 ('d','w')
-  // + пер-осевые инверсия/отключение ('v') — стандартная сборка этого проекта.
-  static final String DEFAULT_LETTERS = "dwv";
   Http http = new Http();
   UpdatePanel panel = new UpdatePanel();
   PApplet papplet;
+
+  // ---- конфигуратор для платы без прошивки (мастер настройки, шаг 2) ----
+  // Плата без прошивки не может ответить на 'V' — определить, что к ней физически
+  // подключено (энкодер, шифтер, load cell...), софтом невозможно. Поэтому вместо
+  // тихого дефолта показываем пользователю список реально собранных CI вариантов
+  // (из manifest.json последнего релиза) и даём выбрать самому.
+  ArrayList<FwVariant> configuratorVariants = new ArrayList<FwVariant>();
+  volatile boolean configuratorLoading = false;
+  volatile String configuratorError = null;
+  File configuratorZip = null;          // кэш, чтобы installFresh не качал релиз повторно
+  JSONObject configuratorManifest = null;
 
   // Режим мастера настройки: вместо тоста «доступно обновление» прошивать сразу
   boolean autoFlash = false;
@@ -215,10 +232,11 @@ class FirmwareUpdater {
     worker.start();
   }
 
-  // Буквы-опции текущей платы (нормализованные); если платы/прошивки нет — конфиг по умолчанию
+  // Буквы-опции текущей платы (нормализованные); "" — неизвестно (нет связи/нет прошивки).
+  // Никаких тихих значений по умолчанию: если конфигурация не определена, вызывающий код
+  // должен явно спросить пользователя (см. конфигуратор мастера) или отказаться прошивать.
   String currentLetters() {
-    String l = (fw != null && fw.optionLetters != null) ? normalizeLetters(fw.optionLetters) : "";
-    return l.length() > 0 ? l : normalizeLetters(DEFAULT_LETTERS);
+    return (fw != null && fw.optionLetters != null) ? normalizeLetters(fw.optionLetters) : "";
   }
 
   // Найти в manifest.json релиза hex-файл под данный набор букв (Leonardo only).
@@ -274,7 +292,8 @@ class FirmwareUpdater {
   }
 
   // Ручная прошивка выбранного релиза (вкладка «Настройки»). Вариант подбирается
-  // по буквам-опциям текущей платы (или по DEFAULT_LETTERS, если прошивки нет).
+  // по буквам-опциям ПОДКЛЮЧЁННОЙ платы; для чистой платы (нет 'V' ответить) кнопка
+  // отключена в UI — используйте конфигуратор мастера настройки вместо неё.
   void startManualFlash(final FwRelease rel) {
     if (flashing) return;
     panel.showWorking(strings.get("Прошивка ", "Flashing ") + rel.tag);
@@ -287,6 +306,7 @@ class FirmwareUpdater {
           JSONObject manifest = readJsonEntry(tmpZip, "manifest.json");
           if (manifest == null) { panel.showError("manifest.json not found in " + rel.tag); return; }
           String myLetters = currentLetters();
+          if (myLetters.length() == 0) { panel.showError(strings.get("Конфигурация платы неизвестна — подключите плату с прошивкой или используйте мастер настройки для чистой платы.", "Board configuration unknown — connect a flashed board, or use the setup wizard for a blank one.")); return; }
           if (!matchVariant(manifest, myLetters)) {
             panel.showError(strings.get("В релизе " + rel.tag + " нет сборки для конфигурации: ", "Release " + rel.tag + " has no build for configuration: ") + myLetters);
             return;
@@ -304,21 +324,74 @@ class FirmwareUpdater {
     t.start();
   }
 
-  // Установка последнего релиза на плату БЕЗ нашей прошивки (мастер настройки):
-  // соединения нет, конфигурацию не спросить — шьём вариант rawLetters на порт напрямую.
+  // Список вариантов сборки для конфигуратора мастера (плата без прошивки — 'V' спросить
+  // некому, поэтому список того, что реально собирает CI, показывается пользователю
+  // напрямую вместо угадывания). Кэширует скачанный zip/manifest — installFresh() ниже
+  // переиспользует их вместо повторного скачивания.
+  void fetchConfiguratorVariants() {
+    if (configuratorLoading || !configuratorVariants.isEmpty()) return;
+    configuratorLoading = true;
+    configuratorError = null;
+    Thread t = new Thread(new Runnable() {
+      public void run() {
+        try {
+          if (buildZipUrl == null || buildZipUrl.length() == 0) fetchLatestCore();
+          if (buildZipUrl.length() == 0) throw new IOException(strings.get("в релизе нет build.zip", "release has no build.zip"));
+          File tmpZip = new File(System.getProperty("java.io.tmpdir"), "wheel_fw_configurator.zip");
+          http.downloadFile(buildZipUrl, tmpZip, null);
+          JSONObject manifest = readJsonEntry(tmpZip, "manifest.json");
+          if (manifest == null) throw new IOException("manifest.json not found in release zip");
+
+          ArrayList<FwVariant> out = new ArrayList<FwVariant>();
+          JSONArray variants = manifest.getJSONArray("variants");
+          for (int i = 0; i < variants.size(); i++) {
+            JSONObject v = variants.getJSONObject(i);
+            if (!v.getString("board").equals("leonardo")) continue;
+            FwVariant fv = new FwVariant();
+            fv.letters = v.getString("letters");
+            fv.file = v.getString("file");
+            JSONArray feats = v.getJSONArray("features");
+            for (int j = 0; j < feats.size(); j++) fv.features.add(feats.getString(j));
+            out.add(fv);
+          }
+          configuratorVariants = out;
+          configuratorZip = tmpZip;
+          configuratorManifest = manifest;
+          Log.info("UPDATE", strings.get("Конфигуратор: доступно сборок — ", "Configurator: builds available — ") + out.size());
+        } catch (Throwable tt) {
+          configuratorError = errText(tt);
+          Log.warn("UPDATE", strings.get("Конфигуратор: список сборок не получен: ", "Configurator: failed to fetch build list: ") + errText(tt));
+        } finally {
+          configuratorLoading = false;
+        }
+      }
+    });
+    t.setDaemon(true);
+    t.start();
+  }
+
+  // Установка выбранного пользователем варианта на плату БЕЗ нашей прошивки (мастер
+  // настройки, шаг «конфигуратор») — соединения ещё нет, порт указывается напрямую.
+  // rawLetters должен быть одним из configuratorVariants (пользователь выбрал сам).
   void installFresh(final String port, final String rawLetters) {
     if (flashing) return;
     panel.showWorking(strings.get("Установка прошивки", "Installing firmware"));
     Thread t = new Thread(new Runnable() {
       public void run() {
         try {
-          panel.setProgress(0.02f, strings.get("Поиск последнего релиза...", "Looking up the latest release..."));
-          if (buildZipUrl == null || buildZipUrl.length() == 0) fetchLatestCore();
-          if (buildZipUrl.length() == 0) throw new IOException(strings.get("в релизе нет build.zip", "release has no build.zip"));
-          File tmpZip = new File(System.getProperty("java.io.tmpdir"), "wheel_fw_release.zip");
-          http.downloadFile(buildZipUrl, tmpZip, null);
-          JSONObject manifest = readJsonEntry(tmpZip, "manifest.json");
-          if (manifest == null) throw new IOException("manifest.json not found in release zip");
+          File tmpZip; JSONObject manifest;
+          if (configuratorZip != null && configuratorManifest != null) {
+            // уже скачано конфигуратором — повторно качать незачем
+            tmpZip = configuratorZip; manifest = configuratorManifest;
+          } else {
+            panel.setProgress(0.02f, strings.get("Поиск последнего релиза...", "Looking up the latest release..."));
+            if (buildZipUrl == null || buildZipUrl.length() == 0) fetchLatestCore();
+            if (buildZipUrl.length() == 0) throw new IOException(strings.get("в релизе нет build.zip", "release has no build.zip"));
+            tmpZip = new File(System.getProperty("java.io.tmpdir"), "wheel_fw_release.zip");
+            http.downloadFile(buildZipUrl, tmpZip, null);
+            manifest = readJsonEntry(tmpZip, "manifest.json");
+            if (manifest == null) throw new IOException("manifest.json not found in release zip");
+          }
           if (!matchVariant(manifest, normalizeLetters(rawLetters)))
             throw new IOException(strings.get("нет сборки для конфигурации ", "no build for configuration ") + rawLetters);
           cachedZipFile = tmpZip;

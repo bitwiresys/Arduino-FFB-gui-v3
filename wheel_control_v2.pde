@@ -641,6 +641,7 @@ public void mouseDragged() {
 }
 
 public void mouseWheel(MouseEvent event) {
+  if (wizard.active) { wizard.handleScroll(event.getCount()); return; }
   if (tabBar.activeTab == TAB_LOG) logTab.handleScroll(event.getCount());
 }
 

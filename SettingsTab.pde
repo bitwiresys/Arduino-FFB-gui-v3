@@ -116,9 +116,12 @@ class SettingsTab {
       text(strings.get("Ошибка: ", "Error: ") + firmwareUpdater.releasesError, x + 12, sy);
     } else if (firmwareUpdater.releases.isEmpty()) {
       text(strings.get("Релизы не найдены", "No releases found"), x + 12, sy);
+    } else if (firmwareUpdater.currentLetters().length() == 0) {
+      fill(color(210, 150, 60));
+      text(strings.get("Конфигурация платы неизвестна — подключите плату с прошивкой (иначе жать некуда).", "Board configuration unknown — connect a flashed board first (nothing to flash otherwise)."), x + 12, sy, w - 24, 28);
     } else {
       text(strings.get("Вариант подбирается по конфигурации платы автоматически (", "The variant is matched to the board configuration automatically (")
-           + firmwareUpdater.currentLetters() + ")", x + 12, sy);
+           + firmwareUpdater.currentLetters() + ")", x + 12, sy, w - 24, 28);
     }
     sy += 18;
     fvListY = sy;
@@ -144,11 +147,11 @@ class SettingsTab {
     fvBtnY = y + h - 38;
     float bw = (w - 24 - 8) / 2.0;
     smlBtn(x + 12, fvBtnY, bw, 28, strings.get("Обновить список", "Refresh list"), color(50, 52, 60));
-    boolean canFlash = !firmwareUpdater.releases.isEmpty() && !firmwareUpdater.flashing;
+    boolean canFlash = !firmwareUpdater.releases.isEmpty() && !firmwareUpdater.flashing && firmwareUpdater.currentLetters().length() > 0;
     smlBtn(x + 12 + bw + 8, fvBtnY, bw, 28,
       strings.get("Прошить выбранную", "Flash selected"), canFlash ? color(140, 80, 45) : color(45, 45, 52));
-    tipZone(x + 12 + bw + 8, fvBtnY, bw, 28, strings.get("Скачает выбранный релиз и прошьёт плату (вариант — по текущей конфигурации).",
-      "Downloads the selected release and flashes the board (variant matched to the current configuration)."));
+    tipZone(x + 12 + bw + 8, fvBtnY, bw, 28, strings.get("Скачает выбранный релиз и прошьёт плату (вариант — по текущей конфигурации подключённой платы).",
+      "Downloads the selected release and flashes the board (variant matched to the currently connected board's configuration)."));
   }
 
   void panel(float x, float y, float w, float h, String t) {
@@ -338,7 +341,7 @@ class SettingsTab {
     float fvBw = (fvW - 24 - 8) / 2.0;
     if (hit(fvX + 12, fvBtnY, fvBw, 28)) { firmwareUpdater.fetchReleases(); return; }
     if (hit(fvX + 12 + fvBw + 8, fvBtnY, fvBw, 28)) {
-      if (!rel.isEmpty() && !firmwareUpdater.flashing && selRelease < rel.size()) {
+      if (!rel.isEmpty() && !firmwareUpdater.flashing && selRelease < rel.size() && firmwareUpdater.currentLetters().length() > 0) {
         firmwareUpdater.startManualFlash(rel.get(selRelease));
       }
       return;

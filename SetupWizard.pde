@@ -48,6 +48,14 @@ class SetupWizard {
   boolean fwSkipOffered = false;
   int fwStepFrames = 0;
 
+  // ---- конфигуратор для «чистой» платы (без прошивки — 'V' спросить некому) ----
+  // Пользователь выбирает из реально собранных CI вариантов (manifest.json релиза),
+  // ничего не ставится по умолчанию втихую.
+  String chosenLetters = null;   // выбор пользователя; null — ещё не выбрано
+  int selConfigVariant = -1;
+  float cfgListY, cfgListH, cfgRowH = 46;
+  float cfgScroll = 0;
+
   // features from firmware
   ArrayList<String> featureList = new ArrayList<String>();
   ArrayList<String> buttonMap = new ArrayList<String>();
@@ -92,6 +100,9 @@ class SetupWizard {
     fwStepStarted = false;
     fwSkipOffered = false;
     fwStepFrames = 0;
+    chosenLetters = null;
+    selConfigVariant = -1;
+    cfgScroll = 0;
     firmwareUpdater.autoFlash = true; // в мастере прошиваем сразу, без тостов
   }
 
@@ -191,8 +202,8 @@ class SetupWizard {
     text(strings.get("Первый запуск. Мастер всё сделает сам:", "First run. The wizard does everything automatically:"), x, y);
     y += 26;
     text(strings.get("• найдёт плату Arduino Leonardo (прошита она или нет — неважно);", "• finds your Arduino Leonardo board (flashed or blank — doesn't matter);"), x, y); y += 20;
-    text(strings.get("• определит её конфигурацию;", "• detects its configuration;"), x, y); y += 20;
-    text(strings.get("• подберёт и установит подходящую прошивку с официального репозитория.", "• picks and installs the matching firmware from the official repository."), x, y); y += 32;
+    text(strings.get("• если прошивка уже есть — определит конфигурацию по ней и обновит при необходимости;", "• if it's already flashed — reads its configuration and updates it if needed;"), x, y); y += 20;
+    text(strings.get("• если плата чистая — попросит выбрать, что к ней подключено, и установит подходящую прошивку с официального репозитория.", "• if it's blank — asks you what's connected to it, then installs the matching firmware from the official repository."), x, y); y += 32;
     fill(colText);
     text(strings.get("Подключите плату по USB и нажмите «Начать».", "Plug the board in via USB and press Start."), x, y);
     y += 40;
@@ -293,8 +304,9 @@ class SetupWizard {
     } else {
       blankBoard = true;
       addLog(strings.get("Найдена плата без прошивки: ", "Found a board without firmware: ") + foundPort);
-      // конфигурацию не спросить — ставим последний релиз в конфигурации по умолчанию
-      firmwareUpdater.installFresh(foundPort, FirmwareUpdater.DEFAULT_LETTERS);
+      // 'V' спросить некому — на шаге 2 покажем конфигуратор (список реальных сборок
+      // CI) и дождёмся выбора пользователя, прежде чем что-либо ставить на плату.
+      firmwareUpdater.fetchConfiguratorVariants();
     }
     step = 2;
     fwStepStarted = true;
@@ -323,13 +335,23 @@ class SetupWizard {
     }
   }
 
-  // ============ STEP 2: Прошивка (автоматически) ============
+  // ============ STEP 2: Прошивка ============
   void drawFirmware(float x, float y, float w, float h) {
     textAlign(LEFT, TOP);
     fill(colText);
     textSize(15);
-    text(strings.get("Шаг 2: Прошивка (автоматически)", "Step 2: Firmware (automatic)"), x, y);
+    text(blankBoard && chosenLetters == null ? strings.get("Шаг 2: Что подключено к плате?", "Step 2: What's connected to the board?")
+                                              : strings.get("Шаг 2: Прошивка (автоматически)", "Step 2: Firmware (automatic)"), x, y);
     y += 36;
+
+    // Плата без прошивки: сначала спрашиваем пользователя, ЧТО к ней подключено
+    // (энкодер, шифтер, load cell...) — определить это программно невозможно, 'V'
+    // ответить некому. Ничего не устанавливаем, пока не выбрано и не подтверждено.
+    if (blankBoard && chosenLetters == null) {
+      drawConfigurator(x, y, w, h);
+      return;
+    }
+
     fwStepFrames++;
 
     // подтягиваем распознанную версию из глобального парсера
@@ -354,8 +376,11 @@ class SetupWizard {
       text(strings.get("Не удалось установить прошивку (см. журнал ниже).", "Failed to install firmware (see the log below)."), x, y);
       y += 34;
       if (btn(x, y, 180, btnH, strings.get("Повторить", "Retry"), colBtn)) {
-        if (blankBoard) firmwareUpdater.installFresh(foundPort, FirmwareUpdater.DEFAULT_LETTERS);
+        if (blankBoard) firmwareUpdater.installFresh(foundPort, chosenLetters);
         else firmwareUpdater.startUpdate();
+      }
+      if (btn(x + 200, y, 180, btnH, strings.get("Выбрать другую конфигурацию", "Pick a different configuration"), colBtnO) && blankBoard) {
+        chosenLetters = null; selConfigVariant = -1; // назад в конфигуратор
       }
       if (fwReady && btn(x + 200, y, 180, btnH, strings.get("Пропустить", "Skip"), colBtnO)) {
         advanceToBinding();
@@ -397,6 +422,94 @@ class SetupWizard {
       } else {
         if (btn(x, byy, 220, btnH, strings.get("Начать поиск заново", "Restart the search"), colBtnO)) beginSearch();
       }
+    }
+  }
+
+  // Конфигуратор для платы без прошивки: показывает реально собранные CI варианты
+  // (manifest.json последнего релиза) с человекочитаемым списком опций, пользователь
+  // выбирает и подтверждает — только тогда что-то устанавливается на плату.
+  void drawConfigurator(float x, float y, float w, float h) {
+    fill(colDim); textSize(12); textAlign(LEFT, TOP);
+    text(strings.get("На плате нет прошивки — определить оборудование программно нельзя. Выберите вручную, что подключено:", "The board has no firmware — hardware can't be auto-detected. Manually select what's connected:"), x, y, w, 32);
+    y += 36;
+
+    FirmwareUpdater fwu = firmwareUpdater;
+    if (fwu.configuratorLoading) {
+      fill(colWarn); textSize(13);
+      text(strings.get("Загрузка списка доступных сборок...", "Loading available builds..."), x, y);
+      return;
+    }
+    if (fwu.configuratorError != null) {
+      fill(colErr); textSize(12);
+      text(strings.get("Ошибка: ", "Error: ") + fwu.configuratorError, x, y, w, 40);
+      y += 46;
+      if (btn(x, y, 180, btnH, strings.get("Повторить", "Retry"), colBtn)) {
+        fwu.configuratorError = null;
+        fwu.fetchConfiguratorVariants();
+      }
+      return;
+    }
+    if (fwu.configuratorVariants.isEmpty()) {
+      fill(colErr); textSize(12);
+      text(strings.get("Список сборок пуст (странно) — попробуйте обновить.", "Build list is empty (odd) — try refreshing."), x, y);
+      y += 24;
+      if (btn(x, y, 180, btnH, strings.get("Обновить", "Refresh"), colBtn)) fwu.fetchConfiguratorVariants();
+      return;
+    }
+
+    ArrayList<FwVariant> vs = fwu.configuratorVariants;
+    float listTop = y;
+    float listBot = y + h - 56;
+    cfgListY = listTop; cfgListH = listBot - listTop;
+    int visibleRows = max(1, int(cfgListH / cfgRowH));
+    float maxScroll = max(0, vs.size() * cfgRowH - cfgListH);
+    cfgScroll = constrain(cfgScroll, 0, maxScroll);
+
+    // область списка (обрезаем содержимое по границам через clip не поддерживается в
+    // Processing напрямую — просто не рисуем строки, полностью ушедшие за границы)
+    stroke(colEdge); noFill(); rect(x, listTop, w, cfgListH);
+    int firstRow = max(0, int(cfgScroll / cfgRowH));
+    int lastRow = min(vs.size(), firstRow + visibleRows + 2);
+    for (int i = firstRow; i < lastRow; i++) {
+      float ry = listTop + i * cfgRowH - cfgScroll;
+      if (ry + cfgRowH < listTop || ry > listBot) continue;
+      FwVariant v = vs.get(i);
+      boolean sel = i == selConfigVariant;
+      boolean hov = mouseX >= x + 4 && mouseX <= x + w - 4 && mouseY >= max(ry, listTop) && mouseY <= min(ry + cfgRowH - 3, listBot);
+      fill(sel ? color(45, 90, 130) : (hov ? colItemH : colItem)); noStroke();
+      rect(x + 4, ry, w - 8, cfgRowH - 3, 4);
+      fill(sel ? 255 : colText); textAlign(LEFT, TOP); textSize(11);
+      String letters = v.letters.length() > 0 ? v.letters : "-";
+      text(letters, x + 12, ry + 4);
+      fill(sel ? color(220, 230, 245) : colDim); textSize(9);
+      String feats = v.features.isEmpty() ? strings.get("базовая сборка, без доп. опций", "base build, no extra options") : join(v.features.toArray(new String[0]), " · ");
+      text(feats, x + 12, ry + 20, w - 24, cfgRowH - 22);
+      // клик по строке — выделить (реальный клик ловим ниже через простой hit-test,
+      // используя тот же btnLatch-паттерн, что и btn(), чтобы не срабатывало на каждый кадр)
+      if (hov && mousePressed && !btnLatch) { selConfigVariant = i; btnLatch = true; }
+    }
+    if (maxScroll > 0) {
+      fill(colDim); textAlign(RIGHT, TOP); textSize(9);
+      text(strings.get("прокрутка колесом мыши", "scroll with mouse wheel"), x + w - 4, listTop - 12);
+    }
+
+    float btnY = listBot + 10;
+    if (selConfigVariant >= 0 && selConfigVariant < vs.size()) {
+      FwVariant sel = vs.get(selConfigVariant);
+      if (btn(x + w - 220, btnY, 220, btnH, strings.get("Установить эту прошивку", "Install this firmware"), colBtn)) {
+        chosenLetters = sel.letters;
+        firmwareUpdater.installFresh(foundPort, chosenLetters);
+      }
+    } else {
+      fill(colDim); textAlign(RIGHT, CENTER); textSize(11);
+      text(strings.get("Выберите вариант из списка выше", "Pick a variant from the list above"), x + w - 12, btnY + btnH / 2);
+    }
+  }
+
+  // Прокрутка списка конфигуратора (вызывается из главного mouseWheel())
+  void handleScroll(float delta) {
+    if (active && step == 2 && blankBoard && chosenLetters == null) {
+      cfgScroll += delta * 40;
     }
   }
 
