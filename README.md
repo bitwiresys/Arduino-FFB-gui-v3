@@ -1,6 +1,17 @@
 # Arduino-FFB-gui v3
 
-A graphical user interface for controlling and monitoring all aspects of the **[Arduino FFB wheel](https://github.com/ranenbg/Arduino-FFB-wheel)** via RS232 serial port. This is a from-scratch Java rewrite of the original Processing-based GUI: same wire protocol and firmware compatibility, new interface — fully bilingual (Russian/English, switchable live in Settings), redesigned Dashboard with inline FFB-effect toggles, and settings that save to the wheel's EEPROM automatically instead of requiring a manual "Save" click. You can use a stand-alone `WheelControlApp.exe` from the **[latest release](https://github.com/bitwiresys/Arduino-FFB-gui-v3/releases/latest)** — it has the Java runtime embedded, nothing else to install.
+A graphical user interface for controlling and monitoring all aspects of the **[Arduino FFB wheel](https://github.com/bitwiresys/Arduino-FFB-wheel-v3)** via RS232 serial port. This is a from-scratch Java rewrite of the original Processing-based GUI: same wire protocol and firmware compatibility, new interface — fully bilingual (Russian/English, switchable live in Settings), redesigned Dashboard with inline FFB-effect toggles, and settings that save to the wheel's EEPROM automatically instead of requiring a manual "Save" click. You can use a stand-alone `WheelControlApp.exe` from the **[latest release](https://github.com/bitwiresys/Arduino-FFB-gui-v3/releases/latest)** — it has the Java runtime embedded, nothing else to install.
+
+### Hands-free setup, no manual COM-port/firmware hunting
+
+The first-run wizard doesn't ask you to pick a COM port or a firmware file - it just says "plug the board in":
+- it scans every COM port for the board's handshake (works even if the board isn't flashed yet, by watching for a new port to appear);
+- if the board already has firmware, the wizard reads its configuration and offers to update it to the latest matching build automatically;
+- if the board is blank, it shows a **configurator** - a plain-English list of every hardware configuration the latest release supports (encoder type, hat switch, shifter, load cell, etc.) pulled straight from the release's `manifest.json` - you pick the one matching your wiring and it installs itself.
+
+The same configurator and version list are available any time afterward from **Settings**, so you can deliberately reflash a working board with a different configuration or an older release without redoing the wizard.
+
+Smart reconnect: if the link drops (cable unplugged, board reset), the panel keeps retrying the saved port in the background and falls back to scanning all ports if the board reappears on a different one - no manual reconnect needed.
 
 ### Screenshots
 ![Dashboard](./screenshots/dashboard.png)
