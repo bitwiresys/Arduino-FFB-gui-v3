@@ -281,7 +281,7 @@ class DashboardTab {
     // I/D ей неизвестны и каждый клик давал бы таймаут в очереди.
     float rowBY = y + h * 0.42;
     axPillH = max(20, h * 0.19);
-    if (fwHas("v")) {
+    if (fwSupportsAxisTweaks()) {
       float pillGap = 8;
       axPillW = (w - 24 - pillGap) / 2.0;
       float invX = x + 12, disX = invX + axPillW + pillGap;

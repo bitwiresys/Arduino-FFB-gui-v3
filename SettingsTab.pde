@@ -289,7 +289,7 @@ class SettingsTab {
       // иначе неизвестная команда молчит и очередь копит таймауты
       axisInvertMask = byte(int(lines[14]) & 0xFF);
       axisDisableMask = byte(int(lines[15]) & 0xFF);
-      if (fwHas("v")) {
+      if (fwSupportsAxisTweaks()) {
         proto.setParam("I ", int(axisInvertMask) & 0xFF);
         proto.setParam("D ", int(axisDisableMask) & 0xFF);
       }

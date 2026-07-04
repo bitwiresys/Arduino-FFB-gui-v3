@@ -497,6 +497,13 @@ boolean fwHas(String letter) {
   return fw != null && fw.optionLetters != null && fw.optionLetters.contains(letter);
 }
 
+// Инверсия/отключение осей (команды I/D) больше не отдельная буква-опция сборки —
+// это всегда встроенная фича начиная с прошивки v255 (см. Config.h, USE_AXIS_TWEAKS
+// удалён). На более старых платах (v254 и ниже, буква 'v') команд I/D ещё нет.
+boolean fwSupportsAxisTweaks() {
+  return fw != null && (fw.versionNumber >= 255 || fw.optionLetters != null && fw.optionLetters.contains("v"));
+}
+
 // Маршрутизация ответов по команде-источнику (протокол строго запрос→ответ).
 // Раньше ответы различались по содержимому, и любые «голые» числа (эхо "1" от FG/FC/...,
 // бинарные эхо E/I/D вида "10110") принимались за build id ('X') или ток мотора ('J') —
@@ -544,7 +551,7 @@ void parseWheelParams(String data) {
   encoderTab.cpr = int(t[14]);
   pwmstate = byte(int(t[15]));
   // dustin's rig, added — хвостовые inv/dis-маски присутствуют только на прошивках с опцией 'v'
-  if (fwHas("v") && t.length > 17) {
+  if (fwSupportsAxisTweaks() && t.length > 17) {
     axisInvertMask = byte(int(t[16]));
     axisDisableMask = byte(int(t[17]));
   }
@@ -596,7 +603,7 @@ void requestDeviceState() {
 
 // dustin's rig, added — flip one bit of the axis invert mask and push it to the firmware (command 'I')
 void toggleAxisInvert(int axisIdx) {
-  if (!fwHas("v")) return; // прошивка без USE_AXIS_TWEAKS не знает команд I/D
+  if (!fwSupportsAxisTweaks()) return; // прошивка не поддерживает команды I/D
   axisInvertMask = byte((int(axisInvertMask) & 0xFF) ^ (1 << axisIdx));
   proto.setParam("I ", int(axisInvertMask) & 0xFF);
   Log.info("AXIS", strings.get("Инверсия оси ", "Axis invert ") + dashboardTab.axPhys[axisIdx] + ": " + (bitReadByte(axisInvertMask, axisIdx) == 1 ? "ON" : "OFF"));
@@ -604,7 +611,7 @@ void toggleAxisInvert(int axisIdx) {
 
 // dustin's rig, added — flip one bit of the axis disable mask and push it to the firmware (command 'D')
 void toggleAxisDisable(int axisIdx) {
-  if (!fwHas("v")) return; // прошивка без USE_AXIS_TWEAKS не знает команд I/D
+  if (!fwSupportsAxisTweaks()) return; // прошивка не поддерживает команды I/D
   axisDisableMask = byte((int(axisDisableMask) & 0xFF) ^ (1 << axisIdx));
   proto.setParam("D ", int(axisDisableMask) & 0xFF);
   Log.info("AXIS", strings.get("Отключение оси ", "Axis disable ") + dashboardTab.axPhys[axisIdx] + ": " + (bitReadByte(axisDisableMask, axisIdx) == 1 ? "ON" : "OFF"));
