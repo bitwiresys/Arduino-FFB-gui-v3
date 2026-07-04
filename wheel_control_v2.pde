@@ -104,12 +104,6 @@ int maxTorque = 2047;
 byte axisInvertMask = 0;
 byte axisDisableMask = 0;
 
-// dustin's rig, added — сторожевой детектор срыва привода (прошивка ≥ v254, команда 'T'):
-// прошивка сама отсекла FFB, потому что мотор долго крутился под нагрузкой при
-// неподвижном энкодере (сорвана шестерня/муфта). Снимается только перезапуском платы.
-boolean ffbFaultLatched = false;
-int lastFaultPoll = 0;
-
 ControlIO control;
 ControlDevice gpad;
 boolean[] hidButtons = new boolean[24];
@@ -368,13 +362,6 @@ public void draw() {
   serial.update();
   proto.update();
   updateAutoReconnect();
-  // dustin's rig, added — опрос сторожевого детектора срыва привода (команда 'T').
-  // Только для прошивок ≥ v254 — старые не знают команду и молчали бы до таймаута.
-  if (serial.isConnected() && !firmwareUpdater.flashing && fw != null && fw.versionNumber >= 254
-      && millis() - lastFaultPoll > 1000) {
-    lastFaultPoll = millis();
-    serial.enqueueCommand("T");
-  }
   readHIDInputs();
   for (int i = 0; i < 5; i++) {
     if (axisEnabled[i]) {
@@ -522,12 +509,6 @@ void parseResponse(String data, String cmd) {
   }
   if (cmd == null) cmd = "";
   if (cmd.equals("X") && data.matches("[0-9]+")) { firmwareUpdater.onLocalBuildId(int(data)); return; }
-  if (cmd.equals("T") && data.matches("[0-9]+")) {
-    boolean f = int(data) != 0;
-    if (f && !ffbFaultLatched) Log.error("SYSTEM", strings.get("СРЫВ ПРИВОДА: энкодер неподвижен под нагрузкой — FFB остановлен прошивкой. Перезапустите плату.", "DRIVETRAIN FAULT: encoder frozen under load — FFB stopped by the firmware. Restart the board."));
-    ffbFaultLatched = f;
-    return;
-  }
   if (cmd.equals("U"))  { parseWheelParams(data); return; }
   if (cmd.equals("YR")) { parsePedalCal(data); return; }
   if (cmd.equals("HG")) { parseShifterCal(data); return; }
@@ -596,7 +577,6 @@ void parseShifterPos(String data) {
 // YR/HG дозапрашиваются после ответа 'V' (см. parseResponse) — когда уже известно,
 // какие опции есть у прошивки и какие команды ей можно слать.
 void requestDeviceState() {
-  ffbFaultLatched = false;         // сторож: после ребута платы латч в прошивке сброшен
   readFWVersion();                 // 'V' — версия и буквы-опции
   serial.enqueueCommand("U");      // все настройки FFB
 }

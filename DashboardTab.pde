@@ -186,13 +186,6 @@ class DashboardTab {
     } else { fill(colDim); text(strings.get("Прошивка не определена", "Firmware unknown"), x + 12, sy); sy += 19; }
     info(x, sy, w, strings.get("CPR энкодера", "Encoder CPR"), str(encoderTab.cpr)); sy += 19;
     info(x, sy, w, strings.get("Макс. момент", "Max Torque"), str(maxTorque)); sy += 19;
-    // dustin's rig, added — сторожевой детектор срыва привода (прошивка ≥ v254)
-    if (ffbFaultLatched) {
-      fill(220, 70, 70); textAlign(LEFT, TOP); textSize(10);
-      text("⚠ " + strings.get("СРЫВ ПРИВОДА — FFB остановлен", "DRIVETRAIN FAULT — FFB stopped"), x + 12, sy);
-      tipZone(x, sy - 2, w, 18, strings.get("Энкодер неподвижен при работающем моторе (сорвана шестерня/муфта). Прошивка остановила FFB. Проверьте механику и перезапустите плату (USB).", "The encoder froze while the motor was driven (sheared gear/coupling). Firmware halted FFB. Check the mechanics and restart the board (re-plug USB)."));
-      sy += 19;
-    }
     // разделитель
     sy += 6; stroke(colEdge); strokeWeight(1); line(x + 12, sy, x + w - 12, sy); sy += 8;
     fill(colDim); textAlign(LEFT, TOP); textSize(10); text(strings.get("Живые оси (АЦП)", "Live Axes (ADC)"), x + 12, sy); sy += 18;
