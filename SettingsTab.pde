@@ -88,27 +88,30 @@ class SettingsTab {
     float fwInfoY = pwmY + pwmH + 12;
     float fwInfoH = 76;
     drawFwInfo(fw, pwmX, fwInfoY, pwmW, fwInfoH);
-    // панель ручной прошивки занимает остаток левой колонки до нижнего края правой
+    // остаток левой колонки делим пополам: версия релиза сверху, конфигурация (буквы) снизу
     float fvY = fwInfoY + fwInfoH + 12;
-    drawFwVersions(pwmX, fvY, pwmW, colBottom - fvY);
+    float remainH = colBottom - fvY;
+    float fvH1 = remainH * 0.42 - 6;
+    drawFwVersions(pwmX, fvY, pwmW, fvH1);
+    drawFwConfig(pwmX, fvY + fvH1 + 12, pwmW, remainH - fvH1 - 12);
     drawProfiles();
     popStyle();
   }
 
   // ---- ручная перепрошивка: выбор версии из релизов GitHub ----
   int selRelease = 0;
-  float fvX, fvY, fvW, fvH, fvListY, fvRowH = 24;
+  float fvX, fvY, fvW, fvH, fvListY, fvRowH = 22;
   float fvBtnY;
 
   void drawFwVersions(float x, float y, float w, float h) {
     fvX = x; fvY = y; fvW = w; fvH = h;
-    panel(x, y, w, h, strings.get("Версии прошивки (ручная прошивка)", "Firmware Versions (manual flashing)"));
+    panel(x, y, w, h, strings.get("Версия прошивки", "Firmware Version"));
 
     // список подгружаем лениво при первом показе панели
-    if (!firmwareUpdater.releasesFetchedOnce && serial != null) firmwareUpdater.fetchReleases();
+    if (!firmwareUpdater.releasesFetchedOnce) firmwareUpdater.fetchReleases();
 
-    float sy = y + 28;
-    fill(colDim); textAlign(LEFT, TOP); textSize(10);
+    float sy = y + 26;
+    fill(colDim); textAlign(LEFT, TOP); textSize(9);
     if (firmwareUpdater.releasesLoading) {
       text(strings.get("Загрузка списка релизов...", "Loading release list..."), x + 12, sy);
     } else if (firmwareUpdater.releasesError != null) {
@@ -116,19 +119,15 @@ class SettingsTab {
       text(strings.get("Ошибка: ", "Error: ") + firmwareUpdater.releasesError, x + 12, sy);
     } else if (firmwareUpdater.releases.isEmpty()) {
       text(strings.get("Релизы не найдены", "No releases found"), x + 12, sy);
-    } else if (firmwareUpdater.currentLetters().length() == 0) {
-      fill(color(210, 150, 60));
-      text(strings.get("Конфигурация платы неизвестна — подключите плату с прошивкой (иначе жать некуда).", "Board configuration unknown — connect a flashed board first (nothing to flash otherwise)."), x + 12, sy, w - 24, 28);
     } else {
-      text(strings.get("Вариант подбирается по конфигурации платы автоматически (", "The variant is matched to the board configuration automatically (")
-           + firmwareUpdater.currentLetters() + ")", x + 12, sy, w - 24, 28);
+      text(strings.get("Версия + конфигурация текущей платы. Свою конфигурацию — в панели ниже.", "Version + current board's configuration. Pick your own config in the panel below."), x + 12, sy, w - 24, 20);
     }
-    sy += 18;
+    sy += 16;
     fvListY = sy;
 
     ArrayList<FwRelease> rel = firmwareUpdater.releases;
     if (selRelease >= rel.size()) selRelease = 0;
-    int maxRows = max(0, int((y + h - 46 - fvListY) / fvRowH));
+    int maxRows = max(0, int((y + h - 34 - fvListY) / fvRowH));
     for (int i = 0; i < rel.size() && i < maxRows; i++) {
       FwRelease r = rel.get(i);
       float ry = fvListY + i * fvRowH;
@@ -136,22 +135,89 @@ class SettingsTab {
       boolean isCurrent = firmwareUpdater.localBuildId >= 0 && r.buildId == firmwareUpdater.localBuildId;
       fill(sel ? color(35, 55, 80) : color(20, 21, 27)); stroke(colEdge); strokeWeight(1);
       rect(x + 12, ry, w - 24, fvRowH - 3, 4);
-      fill(sel ? colText : colDim); noStroke(); textAlign(LEFT, CENTER); textSize(11);
+      fill(sel ? colText : colDim); noStroke(); textAlign(LEFT, CENTER); textSize(10);
       text(r.tag + (i == 0 ? strings.get("  (последняя)", "  (latest)") : ""), x + 22, ry + (fvRowH - 3) / 2);
       if (isCurrent) {
-        fill(color(90, 190, 120)); textAlign(RIGHT, CENTER); textSize(10);
+        fill(color(90, 190, 120)); textAlign(RIGHT, CENTER); textSize(9);
         text(strings.get("на плате ✓", "on board ✓"), x + w - 22, ry + (fvRowH - 3) / 2);
       }
     }
 
-    fvBtnY = y + h - 38;
+    fvBtnY = y + h - 30;
     float bw = (w - 24 - 8) / 2.0;
-    smlBtn(x + 12, fvBtnY, bw, 28, strings.get("Обновить список", "Refresh list"), color(50, 52, 60));
+    smlBtn(x + 12, fvBtnY, bw, 22, strings.get("Обновить список", "Refresh list"), color(50, 52, 60));
     boolean canFlash = !firmwareUpdater.releases.isEmpty() && !firmwareUpdater.flashing && firmwareUpdater.currentLetters().length() > 0;
-    smlBtn(x + 12 + bw + 8, fvBtnY, bw, 28,
+    smlBtn(x + 12 + bw + 8, fvBtnY, bw, 22,
       strings.get("Прошить выбранную", "Flash selected"), canFlash ? color(140, 80, 45) : color(45, 45, 52));
-    tipZone(x + 12 + bw + 8, fvBtnY, bw, 28, strings.get("Скачает выбранный релиз и прошьёт плату (вариант — по текущей конфигурации подключённой платы).",
+    tipZone(x + 12 + bw + 8, fvBtnY, bw, 22, strings.get("Скачает выбранный релиз и прошьёт плату (вариант — по текущей конфигурации подключённой платы).",
       "Downloads the selected release and flashes the board (variant matched to the currently connected board's configuration)."));
+  }
+
+  // ---- выбор конфигурации (букв) из последнего релиза — независимо от того, что уже на плате.
+  // Тот же источник данных, что и конфигуратор мастера для чистой платы (manifest.json).
+  int selConfig = -1;
+  float cfX, cfY, cfW, cfH, cfListY, cfRowH = 34;
+  float cfBtnY;
+  float cfScroll = 0;
+
+  void drawFwConfig(float x, float y, float w, float h) {
+    cfX = x; cfY = y; cfW = w; cfH = h;
+    panel(x, y, w, h, strings.get("Конфигурация (буквы, из последнего релиза)", "Configuration (letters, from the latest release)"));
+
+    if (!firmwareUpdater.configuratorLoading && firmwareUpdater.configuratorVariants.isEmpty() && firmwareUpdater.configuratorError == null) {
+      firmwareUpdater.fetchConfiguratorVariants();
+    }
+
+    float sy = y + 24;
+    if (firmwareUpdater.configuratorLoading) {
+      fill(colDim); textAlign(LEFT, TOP); textSize(9);
+      text(strings.get("Загрузка списка конфигураций...", "Loading configuration list..."), x + 12, sy);
+      return;
+    }
+    if (firmwareUpdater.configuratorError != null) {
+      fill(color(210, 120, 80)); textAlign(LEFT, TOP); textSize(9);
+      text(strings.get("Ошибка: ", "Error: ") + firmwareUpdater.configuratorError, x + 12, sy, w - 24, 30);
+      return;
+    }
+
+    ArrayList<FwVariant> vs = firmwareUpdater.configuratorVariants;
+    if (vs.isEmpty()) {
+      fill(colDim); textAlign(LEFT, TOP); textSize(9);
+      text(strings.get("Список пуст", "List is empty"), x + 12, sy);
+      return;
+    }
+
+    float listTop = sy, listBot = y + h - 34;
+    cfListY = listTop;
+    float maxScroll = max(0, vs.size() * cfRowH - (listBot - listTop));
+    cfScroll = constrain(cfScroll, 0, maxScroll);
+    stroke(colEdge); noFill(); rect(x + 8, listTop, w - 16, listBot - listTop);
+    int first = max(0, int(cfScroll / cfRowH)), last = min(vs.size(), first + int((listBot - listTop) / cfRowH) + 2);
+    for (int i = first; i < last; i++) {
+      FwVariant v = vs.get(i);
+      float ry = listTop + i * cfRowH - cfScroll;
+      if (ry + cfRowH < listTop || ry > listBot) continue;
+      boolean sel = i == selConfig;
+      fill(sel ? color(45, 90, 130) : color(20, 21, 27)); noStroke();
+      rect(x + 12, ry, w - 24, cfRowH - 3, 4);
+      fill(sel ? 255 : colText); textAlign(LEFT, TOP); textSize(11);
+      text(v.letters.length() > 0 ? v.letters : "-", x + 20, ry + 3);
+      fill(sel ? color(220, 230, 245) : colDim); textSize(9);
+      String feats = v.features.isEmpty() ? strings.get("базовая, без опций", "base, no extras") : join(v.features.toArray(new String[0]), " · ");
+      text(feats, x + 20, ry + 18, w - 32, cfRowH - 20);
+    }
+    if (maxScroll > 0) {
+      fill(colDim); textAlign(RIGHT, TOP); textSize(8);
+      text(strings.get("колесо мыши — прокрутка", "mouse wheel to scroll"), x + w - 12, listTop - 10);
+    }
+
+    cfBtnY = y + h - 26;
+    boolean canFlash = selConfig >= 0 && selConfig < vs.size() && !firmwareUpdater.flashing
+      && (serial.isConnected() || firmwareUpdater.lastKnownPort().length() > 0);
+    smlBtn(x + 12, cfBtnY, w - 24, 22, strings.get("Прошить эту конфигурацию", "Flash this configuration"),
+      canFlash ? color(140, 80, 45) : color(45, 45, 52));
+    tipZone(x + 12, cfBtnY, w - 24, 22, strings.get("Скачает последний релиз и прошьёт плату выбранной конфигурацией — независимо от того, что на ней сейчас.",
+      "Downloads the latest release and flashes the board with the selected configuration - regardless of what's on it now."));
   }
 
   void panel(float x, float y, float w, float h, String t) {
@@ -333,16 +399,32 @@ class SettingsTab {
     if (hit(pwmX + 290, y - 2, 34, 22)) { pwmFreq = min(9, pwmFreq + 1); applyPwm(); return; }
     // ручная прошивка: выбор релиза и кнопки
     ArrayList<FwRelease> rel = firmwareUpdater.releases;
-    int maxRows = max(0, int((fvY + fvH - 46 - fvListY) / fvRowH));
+    int maxRows = max(0, int((fvY + fvH - 34 - fvListY) / fvRowH));
     for (int i = 0; i < rel.size() && i < maxRows; i++) {
       float ry = fvListY + i * fvRowH;
       if (hit(fvX + 12, ry, fvW - 24, fvRowH - 3)) { selRelease = i; return; }
     }
     float fvBw = (fvW - 24 - 8) / 2.0;
-    if (hit(fvX + 12, fvBtnY, fvBw, 28)) { firmwareUpdater.fetchReleases(); return; }
-    if (hit(fvX + 12 + fvBw + 8, fvBtnY, fvBw, 28)) {
+    if (hit(fvX + 12, fvBtnY, fvBw, 22)) { firmwareUpdater.fetchReleases(); return; }
+    if (hit(fvX + 12 + fvBw + 8, fvBtnY, fvBw, 22)) {
       if (!rel.isEmpty() && !firmwareUpdater.flashing && selRelease < rel.size() && firmwareUpdater.currentLetters().length() > 0) {
         firmwareUpdater.startManualFlash(rel.get(selRelease));
+      }
+      return;
+    }
+    // выбор конфигурации (буквы) из последнего релиза
+    ArrayList<FwVariant> vs = firmwareUpdater.configuratorVariants;
+    float listBot = cfY + cfH - 34;
+    int first = max(0, int(cfScroll / cfRowH)), last = min(vs.size(), first + int((listBot - cfListY) / cfRowH) + 2);
+    for (int i = first; i < last; i++) {
+      float ry = cfListY + i * cfRowH - cfScroll;
+      if (ry + cfRowH < cfListY || ry > listBot) continue;
+      if (hit(cfX + 12, ry, cfW - 24, cfRowH - 3)) { selConfig = i; return; }
+    }
+    if (hit(cfX + 12, cfBtnY, cfW - 24, 22)) {
+      if (selConfig >= 0 && selConfig < vs.size() && !firmwareUpdater.flashing) {
+        String port = serial.isConnected() ? serial.portName : firmwareUpdater.lastKnownPort();
+        if (port.length() > 0) firmwareUpdater.installFresh(port, vs.get(selConfig).letters);
       }
       return;
     }
@@ -361,4 +443,8 @@ class SettingsTab {
     }
   }
   boolean hit(float x, float y, float w, float h) { return mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h; }
+
+  void handleScroll(float delta) {
+    if (mouseX >= cfX && mouseX <= cfX + cfW && mouseY >= cfY && mouseY <= cfY + cfH) cfScroll += delta * 40;
+  }
 }
