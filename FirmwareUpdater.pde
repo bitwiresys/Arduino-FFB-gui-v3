@@ -526,7 +526,18 @@ class FirmwareUpdater {
   // arduino-cli does its own 1200-baud touch-reset internally as part of `upload` (that's
   // exactly the mechanism proven reliable in this session's manual testing) - no separate
   // touch/port-polling step needed here at all.
-  boolean runArduinoCliUpload(String port, String fqbn, File hexFile, AvrdudeProgress progress) throws Exception {
+  //
+  // dustin's rig, added - hard timeout around the child process. A normal Leonardo upload
+  // takes a few seconds; if the board never actually re-enumerates in bootloader mode (stale
+  // COM port, USB re-numbering, another app holding the port, a flaky cable/hub) avrdude/
+  // arduino-cli can sit retrying with no further stdout for good, and BufferedReader.readLine()
+  // then blocks forever with no way out - exactly the "stuck at 30%, Flashing via arduino-cli..."
+  // hang reported after an update. The read loop now runs on its own thread so a stuck process
+  // can be killed instead of wedging the flash forever; doFlash() (already on a background
+  // thread) still blocks until either the process exits or the timeout fires.
+  static final int ARDUINO_CLI_TIMEOUT_MS = 45000;
+
+  boolean runArduinoCliUpload(String port, String fqbn, File hexFile, final AvrdudeProgress progress) throws Exception {
     File cliDir = new File(getInstallDir(), "arduino-cli");
     File cliExe = new File(cliDir, "arduino-cli.exe");
     File dataDir = new File(cliDir, "data");
@@ -543,14 +554,39 @@ class FirmwareUpdater {
       "--config-file", configFile.getAbsolutePath()
     );
     pb.redirectErrorStream(true);
-    Process proc = pb.start();
-    BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()));
-    String line;
-    while ((line = r.readLine()) != null) {
-      if (progress != null) progress.onLine(line);
-      Log.debug("FLASH", line);
+    final Process proc = pb.start();
+
+    Thread pump = new Thread(new Runnable() {
+      public void run() {
+        try {
+          BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()));
+          String line;
+          while ((line = r.readLine()) != null) {
+            if (progress != null) progress.onLine(line);
+            Log.debug("FLASH", line);
+          }
+        } catch (Throwable t) {
+          // process was killed out from under us on timeout - expected, nothing to report
+        }
+      }
+    });
+    pump.setDaemon(true);
+    pump.start();
+
+    boolean exited = proc.waitFor(ARDUINO_CLI_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+    if (!exited) {
+      Log.error("FLASH", strings.get(
+        "arduino-cli завис (нет ответа " + (ARDUINO_CLI_TIMEOUT_MS / 1000) + " c) — прерываю",
+        "arduino-cli hung (no response for " + (ARDUINO_CLI_TIMEOUT_MS / 1000) + "s) - aborting"));
+      proc.destroyForcibly();
+      pump.join(2000);
+      throw new IOException(strings.get(
+        "Заливка зависла — плата не переходит в режим загрузчика. Отключите и снова подключите руль и повторите попытку.",
+        "Flashing hung - the board isn't entering bootloader mode. Unplug and reconnect the wheel, then try again."));
     }
-    int code = proc.waitFor();
+
+    pump.join(2000); // give the pump thread a moment to drain whatever's left, then move on regardless
+    int code = proc.exitValue();
     return code == 0;
   }
 
