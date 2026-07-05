@@ -472,14 +472,39 @@ class FirmwareUpdater {
       // bundled with just enough offline board+avrdude+discovery-tool data to run with zero
       // network access and no separate Arduino IDE/CLI install on the user's machine.
       String fqbn = "arduino:avr:leonardo"; // dustin's rig - Leonardo only
-      panel.setProgress(0.3f, strings.get("Заливка через arduino-cli...", "Flashing via arduino-cli..."));
-      boolean ok = runArduinoCliUpload(originalPort, fqbn, hexFile, new AvrdudeProgress() {
+      AvrdudeProgress progress = new AvrdudeProgress() {
         public void onLine(String line) {
           String shown = line.length() > 70 ? line.substring(0, 70) : line;
           panel.setProgress(min(panel.progress + 0.01f, 0.9f), shown);
         }
-      });
-      if (!ok) throw new IOException(strings.get("arduino-cli завершился с ошибкой", "arduino-cli exited with an error"));
+      };
+
+      // dustin's rig, added - one retry on the first failure. Even with the port now closed
+      // and verified released (see SerialManager.closeUnderlyingPort()) before we get here,
+      // Windows COM ports can still occasionally report busy for a moment after the previous
+      // owner closes them (driver-level teardown lagging the OS handle release) - a single
+      // retry after a short pause clears exactly that class of transient failure without
+      // masking a real, persistent problem (which still surfaces after the retry as usual).
+      boolean ok = false;
+      IOException lastFailure = null;
+      for (int attempt = 1; attempt <= 2 && !ok; attempt++) {
+        if (attempt > 1) {
+          Log.warn("UPDATE", strings.get("Заливка не удалась, повтор...", "Flashing failed, retrying..."));
+          Thread.sleep(1500);
+        }
+        panel.setProgress(0.3f, attempt == 1
+          ? strings.get("Заливка через arduino-cli...", "Flashing via arduino-cli...")
+          : strings.get("Заливка через arduino-cli (попытка 2)...", "Flashing via arduino-cli (attempt 2)..."));
+        try {
+          ok = runArduinoCliUpload(originalPort, fqbn, hexFile, progress);
+        } catch (IOException ioe) {
+          lastFailure = ioe; // e.g. the 45s hang-timeout from runArduinoCliUpload - still worth one retry
+        }
+      }
+      if (!ok) {
+        if (lastFailure != null) throw lastFailure;
+        throw new IOException(strings.get("arduino-cli завершился с ошибкой", "arduino-cli exited with an error"));
+      }
 
       panel.setProgress(0.95f, strings.get("Переподключение...", "Reconnecting..."));
       Thread.sleep(2000); // board reboots back into the application after a successful flash

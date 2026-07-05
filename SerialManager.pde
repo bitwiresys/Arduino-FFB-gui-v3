@@ -54,11 +54,37 @@ class SerialManager {
 
   void disconnect() {
     if (port != null) {
-      try { port.stop(); } catch (Throwable t) {}
+      closeUnderlyingPort(port);
       port = null;
       Log.info("SERIAL", strings.get("Отключено", "Disconnected"));
     }
     resetLinkState();
+  }
+
+  // dustin's rig, added - Processing's Serial.stop() just calls jssc's closePort() and
+  // silently swallows any SerialPortException, without removing the event listener first.
+  // On Windows that can leave the OS handle actually held a little longer than stop()
+  // returning implies - the background event-listener thread can still be mid-read. The
+  // caller here (disconnect(), used right before FirmwareUpdater's arduino-cli upload) needs
+  // the port GENUINELY free the moment this returns, not just "stop() didn't throw" - a busy
+  // handle at that point makes the touch-reset/upload fail with a port-busy error. So: drop
+  // the event listener first, then retry closePort() for up to ~500ms until isOpened() is
+  // actually false, instead of trusting a single fire-and-forget close + a blind sleep.
+  void closeUnderlyingPort(Serial p) {
+    jssc.SerialPort raw = p.port;
+    try { if (raw != null) raw.removeEventListener(); } catch (Throwable t) {}
+    try { p.stop(); } catch (Throwable t) {}
+    if (raw == null) return;
+    for (int i = 0; i < 10 && raw.isOpened(); i++) {
+      try { raw.closePort(); } catch (Throwable t) {}
+      if (!raw.isOpened()) break;
+      try { Thread.sleep(50); } catch (InterruptedException ie) {}
+    }
+    if (raw.isOpened()) {
+      Log.warn("SERIAL", strings.get(
+        "Порт не удалось закрыть полностью — возможна ошибка занятости порта при следующем открытии",
+        "Could not fully release the port - a busy-port error may occur the next time it's opened"));
+    }
   }
 
   // Полный сброс состояния очереди/ожиданий. Раньше disconnect() оставлял
